@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.log
+analytics.json
+description_cache.json
+*.backup
+.env
+node_modules/
+venv/
+.bash_logout
+.bashrc
+.profile
+.cloud-locale-test.skip

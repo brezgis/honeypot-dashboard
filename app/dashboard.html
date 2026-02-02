@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Honeypot Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍯</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
+
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.8; }
+    50% { transform: scale(1.8); opacity: 0; }
+    100% { transform: scale(1); opacity: 0; }
+  }
+  @keyframes pulse-dot {
+    0% { opacity: 0.6; box-shadow: 0 0 4px #ff0000; }
+    50% { opacity: 1.0; box-shadow: 0 0 12px #ff4444, 0 0 24px #ff000066; }
+    100% { opacity: 0.6; box-shadow: 0 0 4px #ff0000; }
+  }
+  .pulse-marker {
+    position: relative;
+    will-change: transform;
+  }
+  .pulse-marker .dot {
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(circle, #ff4444 0%, #cc0000 70%);
+    border-radius: 50%;
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  .pulse-marker .ring {
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    border: 2px solid #ff4444;
+    border-radius: 50%;
+    animation: pulse-ring 2s ease-out infinite;
+    pointer-events: none;
+  }
+  .leaflet-zoom-anim .leaflet-marker-icon {
+    transition: transform 0.25s cubic-bezier(0,0,0.25,1) !important;
+  }
+  .leaflet-pan-anim .leaflet-marker-icon {
+    transition: transform 0.25s linear !important;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a;
+    color: #00ff41;
+    font-family: 'JetBrains Mono', monospace;
+    overflow-x: hidden;
+  }
+
+  .scanline {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.03) 2px, rgba(0,255,65,0.03) 4px);
+    pointer-events: none; z-index: 9999;
+  }
+
+  header {
+    background: linear-gradient(180deg, #0d1117 0%, #0a0a0a 100%);
+    border-bottom: 1px solid #00ff41;
+    padding: 20px 30px;
+    text-align: center;
+  }
+  header h1 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 2.2em;
+    color: #00ff41;
+    text-shadow: 0 0 20px rgba(0,255,65,0.5), 0 0 40px rgba(0,255,65,0.2);
+    letter-spacing: 3px;
+  }
+  header .subtitle {
+    color: #555;
+    font-size: 0.85em;
+    margin-top: 5px;
+  }
+
+  .stats-bar {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    padding: 20px;
+    background: #0d1117;
+    border-bottom: 1px solid #1a3a1a;
+    flex-wrap: wrap;
+  }
+  .stat {
+    text-align: center;
+    min-width: 120px;
+  }
+  .stat .value {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 2em;
+    color: #00ff41;
+    text-shadow: 0 0 10px rgba(0,255,65,0.4);
+  }
+  .stat .label {
+    font-size: 0.75em;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  .alltime-bar {
+    background: transparent;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    padding: 12px 20px;
+    background: #080c10;
+    border-bottom: 1px solid #1a3a1a;
+    flex-wrap: wrap;
+  }
+  .alltime-stat {
+    text-align: center;
+    min-width: 90px;
+  }
+  .alltime-value {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 1.2em;
+    color: #00aa30;
+    text-shadow: 0 0 6px rgba(0,170,48,0.3);
+  }
+  .alltime-label {
+    font-size: 0.65em;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 3px;
+  }
+
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .grid.full { grid-template-columns: 1fr; }
+
+  .panel {
+    background: #0d1117;
+    border: 1px solid #1a3a1a;
+    border-radius: 8px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 2px;
+    background: linear-gradient(90deg, transparent, #00ff41, transparent);
+  }
+  .panel h2 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 1.1em;
+    color: #00ff41;
+    margin-bottom: 15px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+
+  #map {
+    height: 400px;
+    min-height: 400px;
+    border-radius: 6px;
+    border: 1px solid #1a3a1a;
+    background: #0a0a0a;
+    z-index: 1;
+    position: relative;
+  }
+  .leaflet-container {
+    background: #0a0a0a !important;
+  }
+  #map .leaflet-tile-pane {
+    z-index: 1;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #1a2a1a;
+    font-size: 0.85em;
+  }
+  th {
+    color: #00aa30;
+    text-transform: uppercase;
+    font-size: 0.75em;
+    letter-spacing: 1px;
+  }
+  td { color: #aaa; }
+  .glow { color: #00ff41; font-weight: bold; text-shadow: 0 0 5px rgba(0,255,65,0.3); }
+
+  .activity-feed {
+    height: 350px;
+    max-height: 350px;
+    overflow-y: auto;
+    font-size: 0.82em;
+    flex: 1;
+  }
+  .greatest-hits {
+    max-height: 500px;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .hit-card {
+    background: #111a11;
+    border: 1px solid #1a3a1a;
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .hit-card .hit-nick {
+    color: #ff4444;
+    font-weight: bold;
+    font-size: 1.1em;
+    cursor: pointer;
+  }
+  .hit-card .hit-nick:hover {
+    text-shadow: 0 0 8px rgba(255,68,68,0.5);
+  }
+  .hit-card .hit-stat {
+    color: #00ff41;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.85em;
+    margin: 4px 0;
+  }
+  .hit-card .hit-story {
+    color: #aaa;
+    font-size: 0.85em;
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+  .activity-feed::-webkit-scrollbar { width: 6px; }
+  .activity-feed::-webkit-scrollbar-track { background: #0a0a0a; }
+  .activity-feed::-webkit-scrollbar-thumb { background: #1a3a1a; border-radius: 3px; }
+
+  .activity-row {
+    padding: 6px 10px;
+    border-bottom: 1px solid #111;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+  }
+  .activity-row:hover { background: #111a11; }
+  .activity-row .ts { color: #444; min-width: 150px; font-size: 0.9em; }
+  .activity-row .ip { color: #ff6b6b; min-width: 130px; }
+  .activity-row .action { color: #aaa; flex: 1; min-width: 0; max-height: 80px; overflow-y: auto; overflow-x: hidden; word-break: break-all; white-space: pre-wrap; }
+  .activity-row .action::-webkit-scrollbar { width: 4px; }
+  .activity-row .action::-webkit-scrollbar-track { background: #0a0a0a; }
+  .activity-row .action::-webkit-scrollbar-thumb { background: #1a3a1a; border-radius: 3px; }
+  .success-text { color: #00ff41 !important; font-weight: bold; }
+  .nick-link {
+    color: #ff4444;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .nick-link:hover {
+    color: #ff6666;
+    text-decoration: underline;
+    text-shadow: 0 0 8px rgba(255,68,68,0.5);
+  }
+
+  .terminal {
+    background: #000;
+    border: 1px solid #1a3a1a;
+    border-radius: 6px;
+    padding: 15px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+    max-height: 350px;
+    overflow-y: auto;
+  }
+  .term-header {
+    color: #ff6b6b;
+    font-weight: bold;
+    margin: 10px 0 5px 0;
+    border-bottom: 1px solid #222;
+    padding-bottom: 3px;
+  }
+  .term-line { color: #00ff41; margin: 2px 0; }
+  .term-prompt { color: #ff6b6b; }
+
+  .leaflet-popup-content-wrapper {
+    background: #0d1117 !important;
+    color: #00ff41 !important;
+    border: 1px solid #00ff41 !important;
+    border-radius: 6px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+  }
+  .leaflet-popup-tip { background: #0d1117 !important; }
+  .leaflet-popup-content { font-size: 0.85em; }
+  .popup-ip { color: #ff6b6b; font-weight: bold; font-size: 1.1em; }
+  .popup-label { color: #666; }
+
+  .footer {
+    text-align: center;
+    padding: 20px;
+    color: #333;
+    font-size: 0.8em;
+  }
+
+  canvas { max-height: 300px; }
+
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+    .stats-bar { gap: 15px; }
+  }
+  @media (max-width: 600px) {
+    header h1 { font-size: 1.1em; letter-spacing: 1px; }
+    header .subtitle { font-size: 0.65em; word-break: break-word; }
+    .container { padding: 8px; }
+    .panel { padding: 10px; overflow: visible; }
+    .panel h2 { font-size: 0.85em; letter-spacing: 1px; }
+
+    /* Stats: 2x2 grid instead of horizontal row */
+    .stats-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 8px; }
+    .stat { min-width: unset; }
+    .stat .value { font-size: 1.3em; }
+    .stat .label { font-size: 0.55em; }
+    .alltime-bar { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 8px; }
+    .alltime-stat { min-width: unset; }
+    .alltime-value { font-size: 0.95em; }
+    .alltime-label { font-size: 0.5em; }
+
+    /* Activity feed: stack ts/ip/action vertically */
+    .activity-row { flex-wrap: wrap; gap: 2px; padding: 8px 6px; }
+    .activity-row .ts { min-width: unset; font-size: 0.7em; width: 100%; }
+    .activity-row .ip { min-width: unset; font-size: 0.8em; }
+    .activity-row .action { font-size: 0.75em; width: 100%; max-height: 60px; }
+
+    /* Tables: hide less important columns on mobile */
+    table { width: 100%; table-layout: fixed; }
+    th, td { padding: 6px 4px; font-size: 0.75em; word-break: break-word; white-space: normal; }
+    .hide-mobile { display: none !important; }
+    table { font-size: 0.85em; }
+    table td, table th { padding: 8px 6px; }
+
+    .terminal { font-size: 0.7em; padding: 8px; }
+    .greatest-hits { grid-template-columns: 1fr; }
+    #map { height: 280px; }
+    canvas { max-height: 200px; }
+
+    /* Fix Leaflet touch zoom marker drift */
+    .leaflet-marker-icon { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="scanline"></div>
+
+<header>
+  <h1>🍯 HONEYPOT DASHBOARD</h1>
+  <div class="subtitle">COWRIE SSH HONEYPOT // LIVE ATTACKER INTELLIGENCE // Generated: 2026-02-02 08:15:11 EST</div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat"><div class="value">0</div><div class="label">Sessions Today</div></div>
+  <div class="stat"><div class="value">0</div><div class="label">Login Attempts Today</div></div>
+  <div class="stat"><div class="value">0</div><div class="label">Successful Logins Today</div></div>
+  <div class="stat"><div class="value">0</div><div class="label">Unique IPs Today</div></div>
+  <div class="stat"><div class="value">0</div><div class="label">Commands Today</div></div>
+</div>
+
+
+<div class="container">
+
+  <div class="grid full">
+    <div class="panel" style="overflow:visible;">
+      <h2>🌍 Attack Origins</h2>
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>🏆 Top Attackers</h2>
+      <div style="max-height:350px; overflow-y:auto;">
+        <table>
+          <tr><th>Attacker</th><th>Origin</th><th class="hide-mobile">ISP</th><th>Attempts</th></tr>
+          
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span><br><span style="color:#666;font-size:0.8em">167.99.208.96</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">DigitalOcean, LLC</td>
+            <td class="glow">249</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span><br><span style="color:#666;font-size:0.8em">134.209.207.145</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">DigitalOcean, LLC</td>
+            <td class="glow">224</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;blitz_sol&quot;)">blitz_sol</span><br><span style="color:#666;font-size:0.8em">213.209.159.158</span></td>
+            <td>🇩🇪 Augsburg</td>
+            <td class="hide-mobile">Feo Prest SRL</td>
+            <td class="glow">75</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span><br><span style="color:#666;font-size:0.8em">195.178.110.30</span></td>
+            <td>🇦🇩 Andorra la Vella</td>
+            <td class="hide-mobile">Techoff SRV Limited</td>
+            <td class="glow">60</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span><br><span style="color:#666;font-size:0.8em">2.57.122.208</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">Unmanaged LTD</td>
+            <td class="glow">42</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;bike_sol&quot;)">bike_sol</span><br><span style="color:#666;font-size:0.8em">2.57.122.177</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">Unmanaged LTD</td>
+            <td class="glow">37</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span><br><span style="color:#666;font-size:0.8em">92.118.39.95</span></td>
+            <td>🇺🇸 Dallas</td>
+            <td class="hide-mobile">Unmanaged LTD</td>
+            <td class="glow">29</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span><br><span style="color:#666;font-size:0.8em">167.99.210.70</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">DigitalOcean, LLC</td>
+            <td class="glow">24</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span><br><span style="color:#666;font-size:0.8em">188.166.127.49</span></td>
+            <td>🇳🇱 Amsterdam</td>
+            <td class="hide-mobile">DigitalOcean, LLC</td>
+            <td class="glow">23</td>
+        </tr>
+        <tr>
+            <td><span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span><br><span style="color:#666;font-size:0.8em">92.118.39.62</span></td>
+            <td>🇺🇸 Dallas</td>
+            <td class="hide-mobile">Unmanaged LTD</td>
+            <td class="glow">22</td>
+        </tr>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>📡 Recent Activity</h2>
+      <div class="activity-feed">
+        
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:58:24</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: webmaster/password1</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:58:21</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: weblogic/password1</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:57:40</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: weblogic/1234567890</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:57:36</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: webmaster/1234567890</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:56:59</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/123abc</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:56:49</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/123abc</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:56:19</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/pass123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:56:01</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/pass123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:55:37</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/1q2w3e4r</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:55:13</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/1q2w3e4r</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:54:55</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/qwerty123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:54:25</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/qwerty123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:54:13</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:53:36</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:53:32</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/1234</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:52:49</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: tomcat/admin123</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 18:52:47</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: www-data/1234</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 17:17:49</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: admin/1234567890</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 17:17:15</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span>
+            <span class="ip">104.248.84.130</span>
+            <span class="action ">Login attempt: root/1q2w3e4r</span>
+        </div>
+        <div class="activity-row">
+            <span class="ts">2026-02-01 17:17:02</span>
+            <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span>
+            <span class="ip">174.138.0.114</span>
+            <span class="action ">Login attempt: root/123abc</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid full">
+    <div class="panel">
+      <h2>🎬 Greatest Hits</h2>
+      <div class="greatest-hits">
+        
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('bike_root')">🇳🇱 bike_root</div>
+            <div class="hit-stat">249 attempts · 84 commands</div>
+            <div class="hit-story">The rest of the commands are just... noise.</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 13:34–16:05</div>
+        </div>
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('bike_root_2')">🇳🇱 bike_root_2</div>
+            <div class="hit-stat">224 attempts · 32 commands</div>
+            <div class="hit-story">The system's hardware specs: CPU model, architecture, and RAM help.</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 11:12–13:15</div>
+        </div>
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('blitz_sol')">🇩🇪 blitz_sol</div>
+            <div class="hit-stat">75 attempts</div>
+            <div class="hit-story">Tried 75 login attempts with credentials like ubuntu:temponly, slurm:111111, ubuntu:sky, servidor:111111, user001:user001123. Never got in.</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 14:37–14:57</div>
+        </div>
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('shadow_sol')">🇦🇩 shadow_sol</div>
+            <div class="hit-stat">60 attempts · 28 commands</div>
+            <div class="hit-story">Quick OS check — just kicking the tires before moving on.</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 11:20–14:45</div>
+        </div>
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('stroopwafel_sol')">🇳🇱 stroopwafel_sol</div>
+            <div class="hit-stat">42 attempts · 14 commands</div>
+            <div class="hit-story">Again? What’s the hell, that’s a duplicate?</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 12:53–16:21</div>
+        </div>
+        <div class="hit-card">
+            <div class="hit-nick" onclick="flyToAttacker('bike_sol')">🇳🇱 bike_sol</div>
+            <div class="hit-stat">37 attempts · 2 commands</div>
+            <div class="hit-story">(again) — this is the only time the attacker uses the same command twice. (This is a bit of a</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ 09:52–10:59</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>🔑 Top Credentials</h2>
+      <canvas id="credsChart"></canvas>
+    </div>
+    <div class="panel">
+      <h2>📈 Attack Timeline</h2>
+      <canvas id="timelineChart"></canvas>
+    </div>
+  </div>
+
+  <div class="grid full">
+    <div class="panel">
+      <h2>📊 Daily Breakdown</h2>
+      <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
+        <table>
+          <tr><th>Date</th><th>Sessions</th><th class="hide-mobile">Login Attempts</th><th>Successful</th><th>Unique IPs</th><th class="hide-mobile">Commands</th><th class="hide-mobile">Top Attacker</th></tr>
+          
+        <tr>
+            <td class="glow">2026-02-01</td>
+            <td>968</td>
+            <td class="hide-mobile">922</td>
+            <td>135</td>
+            <td>45</td>
+            <td class="hide-mobile">362</td>
+            <td class="hide-mobile"><span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> <span style="color:#555">(167.99.208.96)</span></td>
+        </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid full">
+    <div class="panel">
+      <h2>📊 All-Time Stats</h2>
+      <div style="overflow-x:auto;">
+        <table>
+          <tr><th>Metric</th><th>Total</th><th>Avg / Day</th></tr>
+          <tr><td>Sessions</td><td class="glow">968</td><td>968.0</td></tr>
+          <tr><td>Login Attempts</td><td class="glow">922</td><td>922.0</td></tr>
+          <tr><td>Successful Logins</td><td class="glow">135</td><td>135.0</td></tr>
+          <tr><td>Unique IPs</td><td class="glow">45</td><td>45.0</td></tr>
+          <tr><td>Commands Executed</td><td class="glow">362</td><td>362.0</td></tr>
+          <tr><td>Days Active</td><td class="glow" colspan="2">1</td></tr>
+          <tr><td>Success Rate</td><td class="glow" colspan="2">14.6%</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid full">
+    <div class="panel">
+      <h2>💀 Successful Logins — What They Did</h2>
+      <div class="terminal" style="max-height:400px; overflow-y:auto;">
+        <div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span> (174.138.0.114) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:16 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:14 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span> (104.248.84.130) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:14 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root&quot;)">clog_root</span> (104.248.84.130) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:13 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span> (174.138.0.114) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:13 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_2&quot;)">windmill_root_2</span> (174.138.0.114) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 17:12 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;cowboy_sol&quot;)">cowboy_sol</span> (92.118.39.87) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 17:10 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">cowboy_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;cowboy_sol&quot;)">cowboy_sol</span> (92.118.39.87) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 17:07 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">cowboy_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;cowboy_sol&quot;)">cowboy_sol</span> (92.118.39.87) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 17:04 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">cowboy_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;cowboy_sol&quot;)">cowboy_sol</span> (92.118.39.87) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 17:01 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">cowboy_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:57 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_root&quot;)">stroopwafel_root</span> (174.138.6.76) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:54 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;rogue_root&quot;)">rogue_root</span> (188.130.180.61) — Drochia, Moldova <span style="color:#555;font-size:0.85em">· 2026-02-01 16:54 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>/ip cloud print</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>ifconfig</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>uname -a</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>cat /proc/cpuinfo</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>ps | grep '[Mm]iner'</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>ps -ef | grep '[Mm]iner'</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>ls -la ~/.local/share/TelegramDesktop/tdata /home/*/.local/share/TelegramDesktop/tdata /dev/ttyGSM* /dev/ttyUSB-mod* /var/spool/sms/* /var/log/smsd.log /etc/smsd.conf* /usr/bin/qmuxd /var/qmux_connect_socket /etc/config/simman /dev/modem* /var/config/sms/*</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>locate D877F783D5D3EF8Cs</div>
+<div class="term-line"><span class="term-prompt">rogue_root@honeypot:~$ </span>echo Hi | cat -n</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root_2&quot;)">clog_root_2</span> (161.35.87.167) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:53 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root_2&quot;)">clog_root_2</span> (161.35.87.167) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:51 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root_2&quot;)">clog_root_2</span> (161.35.87.167) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:48 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:36 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:33 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;clog_root_3&quot;)">clog_root_3</span> (104.248.85.128) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:33 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">clog_root_3@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">clog_root_3@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_3@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">clog_root_3@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:27 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:21 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:21 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:16 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:15 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:08 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:07 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;liberty_sol&quot;)">liberty_sol</span> (92.118.39.62) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 16:05 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">liberty_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 16:02 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:50 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:45 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:41 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_sol&quot;)">windmill_sol</span> (80.94.92.183) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:39 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">windmill_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol_2&quot;)">stroopwafel_sol_2</span> (80.94.92.168) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol_2@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:18 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;hanbok_root&quot;)">hanbok_root</span> (221.158.45.51) — Gongju, South Korea <span style="color:#555;font-size:0.85em">· 2026-02-01 15:14 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>/ip cloud print</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>ifconfig</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>uname -a</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>cat /proc/cpuinfo</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>ps | grep '[Mm]iner'</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>ps -ef | grep '[Mm]iner'</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>ls -la ~/.local/share/TelegramDesktop/tdata /home/*/.local/share/TelegramDesktop/tdata /dev/ttyGSM* /dev/ttyUSB-mod* /var/spool/sms/* /var/log/smsd.log /etc/smsd.conf* /usr/bin/qmuxd /var/qmux_connect_socket /etc/config/simman /dev/modem* /var/config/sms/*</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>locate D877F783D5D3EF8Cs</div>
+<div class="term-line"><span class="term-prompt">hanbok_root@honeypot:~$ </span>echo Hi | cat -n</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 15:12 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:54 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:49 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:49 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:48 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:40 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:38 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:37 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:37 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:35 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:33 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:32 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:31 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:20 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:14 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:13 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:13 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:13 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 14:12 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 14:10 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:58 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:55 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:55 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:53 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:50 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span> (188.166.127.49) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:46 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:41 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:40 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:38 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span> (188.166.127.49) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:38 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span> (188.166.127.49) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:35 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root&quot;)">bike_root</span> (167.99.208.96) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:35 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span> (188.166.127.49) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:34 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;dutch_root&quot;)">dutch_root</span> (188.166.127.49) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:32 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">dutch_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:31 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:30 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:28 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:16 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:14 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:11 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol_2&quot;)">stroopwafel_sol_2</span> (80.94.92.168) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:11 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol_2@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:09 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:06 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 13:02 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 13:01 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:58 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;stroopwafel_sol&quot;)">stroopwafel_sol</span> (2.57.122.208) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:53 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">stroopwafel_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 12:49 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 12:46 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;meatball_root&quot;)">meatball_root</span> (85.227.86.238) — Halmstad, Sweden <span style="color:#555;font-size:0.85em">· 2026-02-01 12:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;meatball_root&quot;)">meatball_root</span> (85.227.86.238) — Halmstad, Sweden <span style="color:#555;font-size:0.85em">· 2026-02-01 12:42 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;meatball_root&quot;)">meatball_root</span> (85.227.86.238) — Halmstad, Sweden <span style="color:#555;font-size:0.85em">· 2026-02-01 12:42 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">meatball_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;star_root&quot;)">star_root</span> (204.111.121.226) — Harrisonburg, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 12:42 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;star_root&quot;)">star_root</span> (204.111.121.226) — Harrisonburg, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 12:41 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;star_root&quot;)">star_root</span> (204.111.121.226) — Harrisonburg, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 12:41 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">star_root@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_3&quot;)">windmill_root_3</span> (81.172.237.143) — Tienhoven, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:41 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_3&quot;)">windmill_root_3</span> (81.172.237.143) — Tienhoven, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:40 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root_3&quot;)">windmill_root_3</span> (81.172.237.143) — Tienhoven, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:40 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Got in, ran some commands, left.</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTFILE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>export HISTSAVE=/dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTFILE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>unset HISTSAVE</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span></div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>if ! type export >/dev/null 2>&1; then</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>echo "ERROR: BADtype: export"</div>
+<div class="term-line"><span class="term-prompt">windmill_root_3@honeypot:~$ </span>exit</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:29 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:12 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 12:01 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:51 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:50 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:48 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:46 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Fingerprinting the system — checking OS, CPU, and hardware specs.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:36 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:34 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:28 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 The digital equivalent of reading the label before opening the package.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:28 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:27 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:25 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:23 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;shadow_sol&quot;)">shadow_sol</span> (195.178.110.30) — Andorra la Vella, Andorra <span style="color:#555;font-size:0.85em">· 2026-02-01 11:20 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">shadow_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:20 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:17 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_root_2&quot;)">bike_root_2</span> (134.209.207.145) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:17 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">bike_root_2@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:17 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;windmill_root&quot;)">windmill_root</span> (167.99.210.70) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 11:15 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; uname=$(uname -s -v -n -m 2>/dev/null); arch=$(uname -m 2>/dev/null); uptime=$(cat /proc/uptime 2>/dev/null | cut -d. -f1); cpus=$( (nproc || grep -c "^processor" /proc/cpuinfo) 2>/dev/null | head -1); cpu_model=$( (grep -m1 -E "model name|Hardware" /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//;s/ *$//' ; lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +| +$/,"",$2); print $2; exit}' ; dmidecode -s processor-version 2>/dev/null | head -n1 ; uname -p 2>/dev/null) | awk 'NF{print; exit}' ); gpu_info=$( (lspci 2>/dev/null | grep -i vga; lspci 2>/dev/null | grep -i nvidia) 2>/dev/null | head -n50); cat_help=$( (cat --help 2>&1 | tr '\n' ' ') || cat --help 2>&1); ls_help=$( (ls --help 2>&1 | tr '\n' ' ') || ls --help 2>&1); last_output=$(last 2>/dev/null | head -n 10); echo "UNAME:$uname"; echo "ARCH:$arch"; echo "UPTIME:$uptime"; echo "CPUS:$cpus"; echo "CPU_MODEL:$cpu_model"; echo "GPU:$gpu_info"; echo "CAT_HELP:$cat_help"; echo "LS_HELP:$ls_help"; echo "LAST:$last_output"</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -s -v -n -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>uname -m 2 > /dev/null</div>
+<div class="term-line"><span class="term-prompt">windmill_root@honeypot:~$ </span>cat /proc/uptime 2 > /dev/null | cut -d. -f1</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 11:09 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Casing the joint: pulled system info to see what they're working with.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 11:06 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:56 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:54 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Standard recon script — uname, CPU count, the usual checklist.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:51 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Ran the attacker's equivalent of kicking the tires.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:47 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_sol&quot;)">bike_sol</span> (2.57.122.177) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 10:46 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:45 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 First thing they did? See if the hardware's worth compromising.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;burger_sol&quot;)">burger_sol</span> (92.118.39.95) — Dallas, United States <span style="color:#555;font-size:0.85em">· 2026-02-01 10:43 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Automated fingerprinting — this box got sized up in seconds.</div>
+<div class="term-line"><span class="term-prompt">burger_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;bike_sol&quot;)">bike_sol</span> (2.57.122.177) — Amsterdam, The Netherlands <span style="color:#555;font-size:0.85em">· 2026-02-01 10:42 EST</span></div>
+<div class="term-line" style="color:#ff9944;font-style:italic;">💡 Checking under the hood — OS version, architecture, processor count.</div>
+<div class="term-line"><span class="term-prompt">bike_sol@honeypot:~$ </span>/bin/./uname -s -v -n -r -m</div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  HONEYPOT DASHBOARD v1.0 // Data from Cowrie SSH Honeypot // 2026-02-02 08:15:11 EST
+</div>
+
+<script>
+  // Map
+  var map = L.map('map', {
+    center: [20, 0],
+    zoom: 2,
+    zoomControl: true,
+    attributionControl: false,
+    maxBounds: [[-85, -180], [85, 180]],
+    maxBoundsViscosity: 1.0,
+    minZoom: 2
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 18
+  }).addTo(map);
+
+  // Fix tile loading on mobile — recalculate container size after render
+  setTimeout(function() { map.invalidateSize(true); }, 100);
+  setTimeout(function() { map.invalidateSize(true); }, 300);
+  setTimeout(function() { map.invalidateSize(true); }, 1000);
+  setTimeout(function() { map.invalidateSize(true); }, 2000);
+  window.addEventListener('resize', function() { map.invalidateSize(true); });
+  document.addEventListener('visibilitychange', function() { if (!document.hidden) map.invalidateSize(true); });
+
+  var markerLookup = {};
+  var pulseMarkers = [];
+  var markers = [{"ip": "167.99.208.96", "lat": 52.352, "lon": 5.1392, "count": 249, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["ubuntu:ubuntu", "root:123321", "admin:pass@123", "postgres:postgresql", "oracle:oracle2024", "user:123456789", "debian:debian1", "postgres:P@ssw0rd", "mysql:mysql123", "ftp:ftp123"], "nickname": "bike_root"}, {"ip": "134.209.207.145", "lat": 52.433347328615156, "lon": 5.1219090915285195, "count": 224, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["www:54321", "test2:654321", "admin:Password", "oracle:p@$word", "mysql:mysql123", "postgres:qwerty", "test1:test11", "admin:54321", "test:wasd", "root:21"], "nickname": "bike_root_2"}, {"ip": "213.209.159.158", "lat": 48.3459, "lon": 10.9161, "count": 75, "country": "Germany", "city": "Augsburg", "isp": "Feo Prest SRL", "creds": ["user001:user001123", "ubuntuserver:ubuntuserver", "test:systest", "steam:steam!", "ubuntu:d", "samba:111111", "slurm:111111", "rust:rust321", "ubuntu:qwerqwer", "serena:serena"], "nickname": "blitz_sol"}, {"ip": "195.178.110.30", "lat": 42.5063, "lon": 1.52184, "count": 60, "country": "Andorra", "city": "Andorra la Vella", "isp": "Techoff SRV Limited", "creds": ["ubuntu:ubuntu", "solv:12345678", "solana:12345678", "sol:sol", "solana:1234567890", "solana:123", "solana:solana", "ubuntu:123456", "solv:solv", "solv:123456"], "nickname": "shadow_sol"}, {"ip": "2.57.122.208", "lat": 52.51622896509548, "lon": 5.037966121271771, "count": 42, "country": "The Netherlands", "city": "Amsterdam", "isp": "Unmanaged LTD", "creds": ["ubuntu:ubuntu", "validator:validator", "sol:sol", "ubuntu:qwer1234", "trading:123456", "trading:trading", "bot:bot", "solv:solv", "sol:123", "trader:trader"], "nickname": "stroopwafel_sol"}, {"ip": "2.57.122.177", "lat": 52.55781130325904, "lon": 4.965943398874989, "count": 37, "country": "The Netherlands", "city": "Amsterdam", "isp": "Unmanaged LTD", "creds": ["firedancer:firedancer", "root:firedancer", "ubuntu:ubuntu", "validator:validator", "sol:sol", "sol:node", "ubuntu:qwer1234", "sol:12345678", "sol:123456", "soltech:soltech"], "nickname": "bike_sol"}, {"ip": "92.118.39.95", "lat": 32.7797, "lon": -96.6822, "count": 29, "country": "United States", "city": "Dallas", "isp": "Unmanaged LTD", "creds": ["ubuntu:ubuntu", "ubuntu:validator", "validator:validator", "sol:sol", "ubuntu:qwer1234", "root:jitoproxy", "root:ethereum", "root:node", "solv:solv", "ubuntu:q1w2e3r4"], "nickname": "burger_sol"}, {"ip": "167.99.210.70", "lat": 52.55090437907365, "lon": 4.918294307346469, "count": 24, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:default", "root:toor", "root:root", "root:alpine", "root:P@ssw0rd", "root:passw0rd", "admin:password", "root:welcome", "root:password", "root:root@123"], "nickname": "windmill_root"}, {"ip": "188.166.127.49", "lat": 52.52520508075688, "lon": 4.8392, "count": 23, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:default", "root:toor", "root:root", "root:alpine", "root:P@ssw0rd", "root:passw0rd", "root:welcome", "root:password", "root:root@123", "root:qwerty"], "nickname": "dutch_root"}, {"ip": "92.118.39.62", "lat": 32.88362304845413, "lon": -96.8622, "count": 22, "country": "United States", "city": "Dallas", "isp": "Unmanaged LTD", "creds": ["sol:sol321", "sol:sol", "solana:solana123", "solana:solana123@", "sol:123456", "solana:validator", "solv:solv", "sol:123", "solana:SOL", "solana:solana"], "nickname": "liberty_sol"}, {"ip": "185.144.27.63", "lat": 48.8558, "lon": 2.3494, "count": 20, "country": "France", "city": "Paris", "isp": "Vem", "creds": ["root:19840517", "root:19850802", "root:19840722", "root:xiaoqing", "root:qwe123asd", "root:52771314", "root:19860727", "root:831101qsl", "root:19850521", "root:19810824"], "nickname": "baguette_root"}, {"ip": "174.138.0.114", "lat": 52.46955705045849, "lon": 4.77739660112501, "count": 19, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:123abc", "weblogic:password1", "tomcat:pass123", "tomcat:1q2w3e4r", "root:123", "root:qwerty123", "tomcat:qwerty123", "tomcat:123abc", "root:password1", "root:1q2w3e4r"], "nickname": "windmill_root_2"}, {"ip": "80.94.92.183", "lat": 52.40918233816355, "lon": 4.7085104798532385, "count": 16, "country": "The Netherlands", "city": "Amsterdam", "isp": "Unmanaged LTD", "creds": ["ubuntu:ubuntu", "sol:testnet", "sol:123", "sol:user", "sol:sol", "solana:solana123", "solana:solana", "sol:ubuntu", "node:node", "solana:sol123"], "nickname": "windmill_sol"}, {"ip": "183.162.210.166", "lat": 31.8616, "lon": 117.286, "count": 15, "country": "China", "city": "Hefei", "isp": "Chinanet", "creds": ["root:docker", "root:vps", "root:default", "root:admin", "root:centos", "root:mysql", "root:debian", "root:linux", "root:nginx", "root:web"], "nickname": "lantern_root"}, {"ip": "104.248.84.130", "lat": 52.310417661836446, "lon": 4.743570479853238, "count": 15, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["webmaster:1234567890", "www-data:1234", "www-data:123", "www-data:123abc", "root:123", "root:qwerty123", "www-data:qwerty123", "www-data:pass123", "webmaster:password1", "root:password1"], "nickname": "clog_root"}, {"ip": "139.19.117.197", "lat": 49.2481, "lon": 6.9979, "count": 12, "country": "Germany", "city": "Saarbr\u00fccken", "isp": "Verein zur Foerderung eines Deutschen Forschungsnetzes e.V.", "creds": ["admin:"], "nickname": "blitz_root"}, {"ip": "161.35.87.167", "lat": 52.2344429495415, "lon": 4.77739660112501, "count": 8, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:admin", "root:12345", "root:password", "root:root", "root:qwerty", "root:123456", "root:123456789", "root:1234"], "nickname": "clog_root_2"}, {"ip": "92.118.39.87", "lat": 32.67577695154586, "lon": -96.8622, "count": 6, "country": "United States", "city": "Dallas", "isp": "Unmanaged LTD", "creds": ["ubuntu:ubuntu", "validator:validator", "sol:sol", "sol:1q2w3e", "solana:solana", "sol:1234"], "nickname": "cowboy_sol"}, {"ip": "174.138.6.76", "lat": 52.17879491924311, "lon": 4.8392, "count": 5, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:123", "root:1", "root:12", "root:root", "root:1234"], "nickname": "stroopwafel_root"}, {"ip": "81.172.237.143", "lat": 52.1506, "lon": 5.0855, "count": 4, "country": "The Netherlands", "city": "Tienhoven", "isp": "DELTA Fiber Nederland B.V.", "creds": ["ubuntu:goITn0w89", "ubuntu:ubuntu"], "nickname": "windmill_root_3"}, {"ip": "204.111.121.226", "lat": 38.446, "lon": -78.8698, "count": 4, "country": "United States", "city": "Harrisonburg", "isp": "Shenandoah Cable Television LLC", "creds": ["ubuntu:goITn0w89", "ubuntu:ubuntu"], "nickname": "star_root"}, {"ip": "85.227.86.238", "lat": 56.6732, "lon": 12.8598, "count": 4, "country": "Sweden", "city": "Halmstad", "isp": "Bredbandsbolaget", "creds": ["ubuntu:goITn0w89", "ubuntu:ubuntu"], "nickname": "meatball_root"}, {"ip": "80.94.92.168", "lat": 52.16869562092635, "lon": 4.883234307346469, "count": 2, "country": "The Netherlands", "city": "Amsterdam", "isp": "Unmanaged LTD", "creds": ["solana:solana"], "nickname": "stroopwafel_sol_2"}, {"ip": "221.158.45.51", "lat": 36.4777, "lon": 127.1311, "count": 2, "country": "South Korea", "city": "Gongju", "isp": "Korea Telecom", "creds": ["root:admin", "root:root"], "nickname": "hanbok_root"}, {"ip": "104.248.85.128", "lat": 52.16178869674096, "lon": 5.001003398874989, "count": 2, "country": "The Netherlands", "city": "Amsterdam", "isp": "DigitalOcean, LLC", "creds": ["root:admin", "root:root"], "nickname": "clog_root_3"}, {"ip": "188.130.180.61", "lat": 48.035, "lon": 27.8161, "count": 2, "country": "Moldova", "city": "Drochia", "isp": "Societatea Comerciala Click-COM SRL", "creds": ["root:admin", "root:root"], "nickname": "rogue_root"}, {"ip": "101.187.203.166", "lat": -33.8726, "lon": 151.0387, "count": 1, "country": "Australia", "city": "Sydney", "isp": "Telstra Limited", "creds": ["ubuntu:ubuntu"], "nickname": "barbie_root"}, {"ip": "45.227.254.10", "lat": 54.6916, "lon": 25.2874, "count": 0, "country": "Lithuania", "isp": "Flyservers S.A.", "creds": []}, {"ip": "60.204.153.115", "lat": 31.2304, "lon": 121.4737, "count": 0, "country": "China", "isp": "Huawei Cloud Service data center", "creds": []}, {"ip": "45.192.184.50", "lat": 22.3193, "lon": 114.169, "count": 0, "country": "Hong Kong", "isp": "Changlian Network Technology co", "creds": []}, {"ip": "162.142.125.206", "lat": 42.2809, "lon": -83.7489, "count": 0, "country": "United States", "isp": "Censys, Inc.", "creds": []}, {"ip": "203.121.106.56", "lat": 3.1831, "lon": 101.6706, "count": 0, "country": "Malaysia", "isp": "TTDOTCOM", "creds": []}, {"ip": "43.228.142.187", "lat": 28.6327, "lon": 77.2198, "count": 0, "country": "India", "isp": "Weebo networks Pvt Ltd", "creds": []}, {"ip": "146.190.241.70", "lat": 43.709, "lon": -79.4057, "count": 0, "country": "Canada", "isp": "DigitalOcean, LLC", "creds": []}, {"ip": "167.71.76.178", "lat": 52.20337103490452, "lon": 5.073026121271771, "count": 0, "country": "The Netherlands", "isp": "DigitalOcean, LLC", "creds": []}, {"ip": "159.223.140.107", "lat": 40.7964, "lon": -74.0203, "count": 0, "country": "United States", "isp": "DigitalOcean, LLC", "creds": []}, {"ip": "194.165.16.167", "lat": 54.9206, "lon": 23.9497, "count": 0, "country": "Lithuania", "isp": "Flyservers S.A.", "creds": []}, {"ip": "60.216.37.11", "lat": 36.6683, "lon": 116.9972, "count": 0, "country": "China", "isp": "CNC Group CHINA169 Shandong Province Network", "creds": []}, {"ip": "205.210.31.206", "lat": 37.3835, "lon": -121.983, "count": 0, "country": "United States", "isp": "Google LLC", "creds": []}, {"ip": "101.206.107.244", "lat": 30.5723, "lon": 104.067, "count": 0, "country": "China", "isp": "China Unicom Sichuan Province Network", "creds": []}, {"ip": "134.209.203.137", "lat": 52.27065267138484, "lon": 5.1219090915285195, "count": 0, "country": "The Netherlands", "isp": "DigitalOcean, LLC", "creds": []}, {"ip": "220.170.52.145", "lat": 26.891, "lon": 112.6145, "count": 0, "country": "China", "isp": "Chinanet", "creds": []}, {"ip": "50.17.112.143", "lat": 39.0438, "lon": -77.4874, "count": 0, "country": "United States", "isp": "Amazon.com", "creds": []}, {"ip": "80.94.95.221", "lat": 47.4979, "lon": 19.0402, "count": 0, "country": "Hungary", "isp": "SS-Net", "creds": []}];
+  markers.forEach(function(m) {
+    var baseRadius = Math.max(6, Math.min(22, m.count * 2));
+    var phase = Math.random() * Math.PI * 2;
+
+    // Outer ring (pulse effect)
+    var ring = L.circleMarker([m.lat, m.lon], {
+      radius: baseRadius * 1.8,
+      fillColor: '#ff4444',
+      fillOpacity: 0,
+      color: '#ff4444',
+      weight: 2,
+      opacity: 0.4
+    }).addTo(map);
+
+    // Inner dot
+    var dot = L.circleMarker([m.lat, m.lon], {
+      radius: baseRadius,
+      fillColor: '#ff4444',
+      fillOpacity: 0.7,
+      color: '#ff6666',
+      weight: 2,
+      opacity: 0.9
+    }).addTo(map);
+
+    pulseMarkers.push({ ring: ring, dot: dot, baseRadius: baseRadius, phase: phase });
+
+    var credsHtml = m.creds.length > 0
+      ? '<br><span class="popup-label">Creds tried:</span><br>' + m.creds.map(function(c) { return '&nbsp;&nbsp;' + c; }).join('<br>')
+      : '';
+
+    dot.bindPopup(
+      '<span style="color:#ff4444;font-weight:bold;font-size:14px">' + (m.nickname || '?') + '</span><br>' +
+      '<span class="popup-ip">' + m.ip + '</span><br>' +
+      '<span class="popup-label">Location:</span> ' + (m.city ? m.city + ', ' : '') + m.country + '<br>' +
+      '<span class="popup-label">ISP:</span> ' + m.isp + '<br>' +
+      '<span class="popup-label">Attempts:</span> <strong>' + m.count + '</strong>' +
+      credsHtml
+    );
+
+    if (m.nickname) markerLookup[m.nickname] = dot;
+    markerLookup[m.ip] = dot;
+  });
+
+  // Animate pulse via JS — no CSS, so no drift
+  function animatePulse() {
+    var t = Date.now() / 1000;
+    pulseMarkers.forEach(function(pm) {
+      var cycle = (Math.sin(t * 2 + pm.phase) + 1) / 2; // 0..1
+      pm.ring.setRadius(pm.baseRadius * (1.4 + cycle * 0.8));
+      pm.ring.setStyle({ opacity: 0.6 - cycle * 0.5, weight: 2 - cycle });
+      pm.dot.setStyle({ fillOpacity: 0.5 + cycle * 0.3 });
+    });
+    requestAnimationFrame(animatePulse);
+  }
+  animatePulse();
+
+  window.flyToAttacker = function(nickname) {
+    var mapEl = document.getElementById('map');
+    if (mapEl) { mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    var m = markerLookup[nickname];
+    if (m) {
+      setTimeout(function() {
+        map.flyTo(m.getLatLng(), 6, {duration: 0.8});
+        setTimeout(function() { m.openPopup(); }, 900);
+      }, 400);
+    }
+  };
+
+  // Credentials chart
+  new Chart(document.getElementById('credsChart'), {
+    type: 'bar',
+    data: {
+      labels: ["ubuntu:ubuntu", "solana:solana", "sol:sol", "admin:", "solv:solv", "root:root", "solv:123456", "root:admin", "sol:solana", "sol:123", "solv:12345678", "solana:sol", "node:node", "validator:validator", "root:123456"],
+      datasets: [{
+        label: 'Attempts',
+        data: [21, 13, 12, 12, 10, 9, 8, 8, 7, 6, 6, 6, 5, 5, 5],
+        backgroundColor: 'rgba(0, 255, 65, 0.6)',
+        borderColor: '#00ff41',
+        borderWidth: 1,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#666' },
+          grid: { color: '#1a2a1a' },
+        },
+        y: {
+          ticks: { color: '#00ff41', font: { family: 'JetBrains Mono', size: 11 } },
+          grid: { display: false },
+        }
+      }
+    }
+  });
+
+  // Timeline chart
+  new Chart(document.getElementById('timelineChart'), {
+    type: 'line',
+    data: {
+      labels: ["2026-02-01 09:00 EST", "2026-02-01 10:00 EST", "2026-02-01 11:00 EST", "2026-02-01 12:00 EST", "2026-02-01 13:00 EST", "2026-02-01 14:00 EST", "2026-02-01 15:00 EST", "2026-02-01 16:00 EST", "2026-02-01 17:00 EST", "2026-02-01 18:00 EST"],
+      datasets: [{
+        label: 'Attempts',
+        data: [5, 40, 164, 135, 128, 202, 140, 63, 28, 17],
+        borderColor: '#00ff41',
+        backgroundColor: 'rgba(0, 255, 65, 0.1)',
+        fill: true,
+        tension: 0.3,
+        pointBackgroundColor: '#00ff41',
+        pointRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#666', maxRotation: 45, maxTicksLimit: 6, callback: function(val, idx, ticks) { var label = this.getLabelForValue(val); var parts = label.split(' '); return parts[0].slice(5) + ' ' + parts[1]; } },
+          grid: { color: '#1a2a1a' },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { color: '#666' },
+          grid: { color: '#1a2a1a' },
+        }
+      }
+    }
+  });
+</script>
+
+</body>
+</html>
