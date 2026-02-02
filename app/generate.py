@@ -5,6 +5,7 @@ Parses Cowrie JSON logs, does GeoIP lookups, generates a self-contained HTML das
 """
 
 import json
+import glob
 import hashlib
 import os
 import sys
@@ -1493,7 +1494,14 @@ def generate_html(data):
 
 def main():
     print("[*] Parsing Cowrie log...")
-    events = parse_log(LOG_PATH)
+    # Read current + rotated logs
+    log_files = sorted(glob.glob(LOG_PATH + "*")) + [LOG_PATH]
+    seen = set()
+    events = []
+    for lf in log_files:
+        if lf not in seen:
+            seen.add(lf)
+            events.extend(parse_log(lf))
     print(f"[*] Loaded {len(events)} events")
 
     if not events:
