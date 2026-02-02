@@ -1073,11 +1073,17 @@ def generate_html(data):
     transition: transform 0.25s linear !important;
   }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  html {{
+    overflow-x: hidden;
+    max-width: 100vw;
+  }}
   body {{
     background: #0a0a0a;
     color: #00ff41;
     font-family: 'JetBrains Mono', monospace;
     overflow-x: hidden;
+    max-width: 100vw;
+    -webkit-text-size-adjust: 100%;
   }}
 
   .scanline {{
@@ -1164,6 +1170,8 @@ def generate_html(data):
     max-width: 1400px;
     margin: 0 auto;
     padding: 20px;
+    width: 100%;
+    overflow-x: hidden;
   }}
 
   .grid {{
@@ -1171,8 +1179,9 @@ def generate_html(data):
     grid-template-columns: 1fr 1fr;
     gap: 20px;
     margin-bottom: 20px;
+    max-width: 100%;
   }}
-  .grid.full {{ grid-template-columns: 1fr; }}
+  .grid.full {{ grid-template-columns: 1fr; max-width: 100%; }}
 
   .panel {{
     background: #0d1117;
@@ -1183,6 +1192,9 @@ def generate_html(data):
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
   }}
   .panel::before {{
     content: '';
@@ -1219,6 +1231,7 @@ def generate_html(data):
   table {{
     width: 100%;
     border-collapse: collapse;
+    word-break: break-word;
   }}
   th, td {{
     padding: 8px 12px;
@@ -1316,6 +1329,10 @@ def generate_html(data):
     font-size: 0.85em;
     max-height: 350px;
     overflow-y: auto;
+    overflow-x: hidden;
+    word-break: break-all;
+    white-space: pre-wrap;
+    max-width: 100%;
   }}
   .term-header {{
     color: #ff6b6b;
@@ -1324,7 +1341,7 @@ def generate_html(data):
     border-bottom: 1px solid #222;
     padding-bottom: 3px;
   }}
-  .term-line {{ color: #00ff41; margin: 2px 0; }}
+  .term-line {{ color: #00ff41; margin: 2px 0; word-break: break-all; overflow-wrap: break-word; }}
   .cmd-note {{
     color: #0a8;
     font-style: italic;
@@ -1363,7 +1380,8 @@ def generate_html(data):
     header h1 {{ font-size: 1.1em; letter-spacing: 1px; }}
     header .subtitle {{ font-size: 0.65em; word-break: break-word; }}
     .container {{ padding: 8px; }}
-    .panel {{ padding: 10px; overflow: visible; }}
+    .panel {{ padding: 10px; overflow: hidden; max-width: 100vw; }}
+    .panel > div {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
     .panel h2 {{ font-size: 0.85em; letter-spacing: 1px; }}
 
     /* Stats: 2x2 grid instead of horizontal row */
@@ -1396,6 +1414,12 @@ def generate_html(data):
 
     /* Fix Leaflet touch zoom marker drift */
     .leaflet-marker-icon {{ transition: none !important; }}
+
+    /* Prevent mobile zoom-out beyond viewport */
+    html, body {{ touch-action: pan-x pan-y; max-width: 100vw; }}
+    .container {{ max-width: 100vw; padding: 6px; overflow-x: hidden; }}
+    .grid {{ gap: 10px; margin-bottom: 10px; }}
+    .grid.full {{ max-width: 100%; }}
   }}
 </style>
 </head>
