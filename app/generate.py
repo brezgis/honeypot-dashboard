@@ -548,20 +548,40 @@ def generate_greatest_hits(data):
                     if base and base not in ("export", "echo", "2", "head", "cut", "awk", "sed", "grep", "tr"):
                         key_cmds.add(base)
             cmd_list = ", ".join(sorted(key_cmds)[:8])
-            prompt = f"""Honeypot attacker one-liner (be specific and punchy):
-cat, dmidecode, lscpu, lspci, nproc, uname → Ran a full hardware audit: CPU model, GPU, core count, uptime. Shopping for crypto mining targets.
-chmod, wget → Downloaded and executed a remote payload. Zero subtlety.
-export, history, unset → Disabled command history before doing anything. Knows the drill.
-uname → Quick OS check — just kicking the tires before moving on.
-{cmd_list} →"""
-            story = llm_generate(prompt, temperature=0.8, max_tokens=25)
+            prompt = f"""SSH honeypot attacker summary. Explain what they did and WHY it matters. Be technical and specific.
+
+Attacker: 249 attempts, 84 commands. Ran: cat, dmidecode, free, lscpu, lspci, nproc, uname. From: Netherlands, DigitalOcean.
+→ Persistent scanner from a cloud VPS. Full hardware audit (CPU, GPU, RAM, PCI devices) — profiling this box for cryptomining potential. 249 attempts shows automated tooling.
+
+Attacker: 12 attempts, 3 commands. Ran: wget, chmod, bash. From: China, Alibaba Cloud.
+→ Smash-and-grab: downloaded a remote script and executed it immediately. Likely deploying a cryptominer or botnet agent. No recon, straight to payload delivery.
+
+Attacker: 75 attempts, 0 commands. Credentials tried: ubuntu:temponly, slurm:111111, servidor:111111. From: Germany, Hetzner.
+→ Pure credential brute-forcer. 75 attempts with service-specific passwords (slurm = HPC clusters, servidor = Portuguese for server). Scanning for misconfigured compute nodes.
+
+Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds_str}. From: {country}, {isp}.
+→"""
+            story = llm_generate(prompt, temperature=0.7, max_tokens=60)
             if not story or any(story.lower().startswith(p) for p in ["here", "i can", "we ", "okay", "the attacker", "this command", "this is", "let me", "it looks", "the user"]):
                 story = classify_commands_fast(cmds)
             if not story:
                 story = "Got in, poked around, ran some commands."
             desc_cache[cache_key] = story
         else:
-            story = f"Tried {count} login attempts with credentials like {creds_str}. Never got in."
+            # Generate a more informative description even without commands
+            cred_list = creds[:8]
+            cred_types = []
+            for c in cred_list:
+                if "/" in c:
+                    u = c.split("/")[0]
+                    if u in ("root", "admin", "administrator"): cred_types.append("admin")
+                    elif u in ("ubuntu", "debian", "centos"): cred_types.append("linux-default")
+                    elif u in ("solana", "sol", "validator"): cred_types.append("crypto")
+                    elif u in ("oracle", "postgres", "mysql", "redis"): cred_types.append("database")
+                    elif u in ("git", "deploy", "jenkins", "docker"): cred_types.append("devops")
+            cred_types = list(set(cred_types))
+            type_str = ", ".join(cred_types[:3]) if cred_types else "mixed"
+            story = f"Brute-force scanner ({type_str} credentials). {count} attempts with combos like {creds_str}. Never breached."
             desc_cache[cache_key] = story
         if story:
             # Clean up LLM artifacts
