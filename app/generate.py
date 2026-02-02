@@ -1495,7 +1495,8 @@ def generate_html(data):
 def main():
     print("[*] Parsing Cowrie log...")
     # Read current + rotated logs
-    log_files = sorted(glob.glob(LOG_PATH + "*")) + [LOG_PATH]
+    rotated = sorted(f for f in glob.glob(LOG_PATH + "*") if f != LOG_PATH)
+    log_files = rotated + [LOG_PATH]  # rotated first, current last
     seen = set()
     events = []
     for lf in log_files:
