@@ -1224,11 +1224,11 @@ def generate_html(data):
 </header>
 
 <div class="stats-bar">
-  <div class="stat"><div class="value">{stats['total_sessions']}</div><div class="label">Total Sessions</div><div class="sublabel">{today['sessions']} today</div></div>
-  <div class="stat"><div class="value">{stats['total_login_attempts']}</div><div class="label">Login Attempts</div><div class="sublabel">{today['login_attempts']} today</div></div>
-  <div class="stat"><div class="value">{stats['successful_logins']}</div><div class="label">Successful Logins</div><div class="sublabel">{today['successful_logins']} today</div></div>
-  <div class="stat"><div class="value">{stats['unique_ips']}</div><div class="label">Unique IPs</div><div class="sublabel">{today['unique_ips']} today</div></div>
-  <div class="stat"><div class="value">{stats['commands_executed']}</div><div class="label">Commands</div><div class="sublabel">{today['commands']} today</div></div>
+  <div class="stat"><div class="value">{today['sessions']}</div><div class="label">Sessions Today</div></div>
+  <div class="stat"><div class="value">{today['login_attempts']}</div><div class="label">Login Attempts Today</div></div>
+  <div class="stat"><div class="value">{today['successful_logins']}</div><div class="label">Successful Logins Today</div></div>
+  <div class="stat"><div class="value">{today['unique_ips']}</div><div class="label">Unique IPs Today</div></div>
+  <div class="stat"><div class="value">{today['commands']}</div><div class="label">Commands Today</div></div>
 </div>
 
 
