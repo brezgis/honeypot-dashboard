@@ -578,5 +578,45 @@
     "lon": 4.8975,
     "isp": "Timeweb, LLP",
     "org": "Timeweb, LLP"
+  },
+  "27.79.7.142": {
+    "country": "Vietnam",
+    "countryCode": "VN",
+    "region": "Da Nang",
+    "city": "Da Nang",
+    "lat": 16.0685,
+    "lon": 108.2215,
+    "isp": "Viettel Corporation",
+    "org": "VIETEL"
+  },
+  "95.215.0.144": {
+    "country": "Russia",
+    "countryCode": "RU",
+    "region": "St.-Petersburg",
+    "city": "St Petersburg",
+    "lat": 59.8761,
+    "lon": 30.4339,
+    "isp": "PIN-DATACENTER",
+    "org": ""
+  },
+  "14.103.138.129": {
+    "country": "China",
+    "countryCode": "CN",
+    "region": "Beijing",
+    "city": "Beijing",
+    "lat": 39.9042,
+    "lon": 116.407,
+    "isp": "BITNET",
+    "org": "Beijing Bitone United Networks Technology Service Co., Ltd."
+  },
+  "171.231.182.165": {
+    "country": "Vietnam",
+    "countryCode": "VN",
+    "region": "Hanoi",
+    "city": "Hanoi",
+    "lat": 21.0278,
+    "lon": 105.834,
+    "isp": "Viettel Corporation",
+    "org": "VIETEL"
   }
 }
