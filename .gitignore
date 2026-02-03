@@ -11,3 +11,4 @@ venv/
 .bashrc
 .profile
 .cloud-locale-test.skip
+*.bak

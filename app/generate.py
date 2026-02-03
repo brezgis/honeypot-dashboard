@@ -15,6 +15,8 @@ import urllib.request
 import urllib.error
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+LOCAL_TZ = ZoneInfo("America/New_York")
 
 # Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -165,13 +167,29 @@ def load_geo_cache():
     if os.path.exists(CACHE_PATH):
         try:
             with open(CACHE_PATH, "r") as f:
-                return json.load(f)
+                cache = json.load(f)
         except (json.JSONDecodeError, IOError):
-            pass
+            return {}
+        # Prune entries older than 30 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        pruned = {}
+        for k, v in cache.items():
+            if isinstance(v, dict) and "_cached_at" in v:
+                if v["_cached_at"] > cutoff:
+                    pruned[k] = v
+            else:
+                pruned[k] = v
+        if len(pruned) < len(cache):
+            print(f"[*] Pruned {len(cache) - len(pruned)} stale geoip cache entries")
+        return pruned
     return {}
 
 
 def save_geo_cache(cache):
+    now = datetime.now(timezone.utc).isoformat()
+    for k, v in cache.items():
+        if isinstance(v, dict) and "_cached_at" not in v:
+            v["_cached_at"] = now
     with open(CACHE_PATH, "w") as f:
         json.dump(cache, f, indent=2)
 
@@ -303,13 +321,48 @@ CACHE_FILE = "/home/dashboard/app/description_cache.json"
 def load_cache():
     try:
         with open(CACHE_FILE, "r") as f:
-            return json.load(f)
+            cache = json.load(f)
     except:
         return {}
+    # Prune entries older than 30 days
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    pruned = {}
+    for k, v in cache.items():
+        if isinstance(v, dict) and "_cached_at" in v:
+            if v["_cached_at"] > cutoff:
+                pruned[k] = v
+        elif isinstance(v, str):
+            # Legacy entry without timestamp - keep it, will get timestamp on next write
+            pruned[k] = v
+        else:
+            pruned[k] = v
+    if len(pruned) < len(cache):
+        print(f"[*] Pruned {len(cache) - len(pruned)} stale description cache entries")
+    return pruned
+
+def _cache_get(cache, key):
+    """Get value from cache, handling both old (string) and new (dict with text) formats."""
+    v = cache.get(key)
+    if v is None:
+        return None
+    if isinstance(v, dict):
+        return v.get("text", v.get("story", ""))
+    return v
 
 def save_cache(cache):
+    # Add _cached_at to entries being saved
+    now = datetime.now(timezone.utc).isoformat()
+    out = {}
+    for k, v in cache.items():
+        if isinstance(v, str):
+            out[k] = {"text": v, "_cached_at": now}
+        elif isinstance(v, dict) and "_cached_at" not in v:
+            v["_cached_at"] = now
+            out[k] = v
+        else:
+            out[k] = v
     with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f, indent=2)
+        json.dump(out, f, indent=2)
 
 
 def analyze_events(events, geo_cache):
@@ -336,7 +389,7 @@ def analyze_events(events, geo_cache):
     session_creds = {}
 
     # Per-day tracking
-    EST = timezone(timedelta(hours=-5))
+    LOCAL_TZ = ZoneInfo("America/New_York")
 
     daily_sessions = Counter()
     daily_login_attempts = Counter()
@@ -360,7 +413,7 @@ def analyze_events(events, geo_cache):
         # Track timestamp for daily stats
         if ts:
             try:
-                dt_est = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(EST)
+                dt_est = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(LOCAL_TZ)
                 day_key = dt_est.strftime("%Y-%m-%d")
                 all_timestamps.append(dt_est)
             except (ValueError, AttributeError):
@@ -395,7 +448,8 @@ def analyze_events(events, geo_cache):
             # Timeline bucket
             try:
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                bucket = dt.astimezone(timezone(timedelta(hours=-5))).strftime("%Y-%m-%d %H:00 EST")
+                dt_local = dt.astimezone(LOCAL_TZ)
+                bucket = dt_local.strftime("%Y-%m-%d %H:00 ") + dt_local.strftime("%Z")
                 timeline[bucket] += 1
             except (ValueError, AttributeError):
                 pass
@@ -424,7 +478,8 @@ def analyze_events(events, geo_cache):
                     daily_ip_attempts[day_key][ip] += 1
             try:
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                bucket = dt.astimezone(timezone(timedelta(hours=-5))).strftime("%Y-%m-%d %H:00 EST")
+                dt_local = dt.astimezone(LOCAL_TZ)
+                bucket = dt_local.strftime("%Y-%m-%d %H:00 ") + dt_local.strftime("%Z")
                 timeline[bucket] += 1
             except (ValueError, AttributeError):
                 pass
@@ -537,7 +592,7 @@ def analyze_events(events, geo_cache):
     success_data.sort(key=lambda s: s["commands"][0]["ts"] if s["commands"] else "", reverse=True)
 
     # Build daily breakdown
-    today_est = datetime.now(EST).strftime("%Y-%m-%d")
+    today_est = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     all_days = sorted(set(
         list(daily_sessions.keys()) + list(daily_login_attempts.keys()) +
         list(daily_commands.keys())
@@ -575,7 +630,7 @@ def analyze_events(events, geo_cache):
     # Days active and attacks per day
     if all_timestamps:
         first_event = min(all_timestamps)
-        days_active = max(1, (datetime.now(EST) - first_event).days + 1)
+        days_active = max(1, (datetime.now(LOCAL_TZ) - first_event).days + 1)
     else:
         days_active = 0
     attacks_per_day = round(stats["total_login_attempts"] / max(1, days_active), 1)
@@ -607,12 +662,35 @@ def analyze_events(events, geo_cache):
         "ip_creds": dict(ip_creds),
         "ip_first_seen": ip_first_seen,
         "ip_last_seen": ip_last_seen,
-        "generated": datetime.now(EST).strftime("%Y-%m-%d %H:%M:%S EST"),
+        "generated": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
     }
+
+
+def ollama_healthy():
+    """Quick check if Ollama is responding."""
+    try:
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        resp = urllib.request.urlopen(req, timeout=2)
+        return resp.status == 200
+    except Exception:
+        return False
+
+
+_ollama_is_healthy = None  # Cached per-run
+
+def _check_ollama_once():
+    global _ollama_is_healthy
+    if _ollama_is_healthy is None:
+        _ollama_is_healthy = ollama_healthy()
+        if not _ollama_is_healthy:
+            print("[!] Ollama not responding, skipping LLM descriptions this run")
+    return _ollama_is_healthy
 
 
 def llm_generate(prompt, model="qwen3:4b", temperature=0.5, max_tokens=30):
     """Call Ollama to generate text using raw mode (no chat template). Falls back to empty string on failure."""
+    if not _check_ollama_once():
+        return ""
     try:
         payload = json.dumps({"model": model, "prompt": prompt, "stream": False, "raw": True, "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": 512, "stop": ["\n"]}}).encode()
         req = urllib.request.Request(
@@ -656,7 +734,7 @@ def generate_greatest_hits(data):
         cache_key = f"gh_{ip}_{cmd_hash}"
         
         if cache_key in desc_cache:
-            story = desc_cache[cache_key]
+            story = _cache_get(desc_cache, cache_key)
         elif cmds:
             # Try LLM with qwen3:4b
             # Extract just the key command names, not the full args
@@ -729,14 +807,14 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
         last = data.get("ip_last_seen", {}).get(ip, "")
         if first and last:
             try:
-                f_utc = datetime.fromisoformat(first.replace("Z", "+00:00")[:26])
-                l_utc = datetime.fromisoformat(last.replace("Z", "+00:00")[:26])
-                f_est = f_utc - timedelta(hours=5)
-                l_est = l_utc - timedelta(hours=5)
-                f_short = f_est.strftime("%H:%M")
-                l_short = l_est.strftime("%H:%M")
-                f_date = f_est.strftime("%Y-%m-%d")
-                l_date = l_est.strftime("%Y-%m-%d")
+                f_utc = datetime.fromisoformat(first.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
+                l_utc = datetime.fromisoformat(last.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
+                f_local = f_utc.astimezone(ZoneInfo("America/New_York"))
+                l_local = l_utc.astimezone(ZoneInfo("America/New_York"))
+                f_short = f_local.strftime("%H:%M")
+                l_short = l_local.strftime("%H:%M")
+                f_date = f_local.strftime("%Y-%m-%d")
+                l_date = l_local.strftime("%Y-%m-%d")
             except:
                 f_short = first[11:16]
                 l_short = last[11:16]
@@ -864,7 +942,7 @@ def generate_command_explanations(data):
         
         if cache_key in desc_cache:
             # Layer 0: cached result (from any previous layer)
-            explanation = desc_cache[cache_key]
+            explanation = _cache_get(desc_cache, cache_key)
         else:
             # Layer 2: try pattern matching first (instant)
             explanation = classify_commands_fast(cmds)
@@ -963,7 +1041,7 @@ def generate_html(data):
     for ev in reversed(data["recent_events"]):
         try:
             dt_ev = datetime.fromisoformat(ev["ts"].replace("Z", "+00:00"))
-            ts_short = dt_ev.astimezone(timezone(timedelta(hours=-5))).strftime("%Y-%m-%d %H:%M:%S")
+            ts_short = dt_ev.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, AttributeError):
             ts_short = ev["ts"][:19].replace("T", " ") if ev["ts"] else "?"
         action_class = "success-text" if "SUCCESS" in ev["action"] else ""
@@ -989,9 +1067,9 @@ def generate_html(data):
             first_ts_raw = s["commands"][0]["ts"] if s["commands"] else ""
             if first_ts_raw:
                 try:
-                    utc_dt = datetime.fromisoformat(first_ts_raw.replace("Z", "+00:00")[:26])
-                    est_dt = utc_dt - timedelta(hours=5)
-                    first_ts = est_dt.strftime("%Y-%m-%d %H:%M") + " EST"
+                    utc_dt = datetime.fromisoformat(first_ts_raw.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
+                    local_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
+                    first_ts = local_dt.strftime("%Y-%m-%d %H:%M %Z")
                 except:
                     first_ts = first_ts_raw[:16].replace("T", " ")
             else:
@@ -1724,7 +1802,28 @@ def main():
         if lf not in seen:
             seen.add(lf)
             events.extend(parse_log(lf))
-    print(f"[*] Loaded {len(events)} events")
+    print(f"[*] Loaded {len(events)} events from {len(log_files)} files")
+
+    # Cap to last 7 days
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    before_filter = len(events)
+    events = [e for e in events if datetime.fromisoformat(
+        e.get('timestamp', '2000-01-01T00:00:00').replace('Z', '+00:00')
+    ) > cutoff]
+    if len(events) < before_filter:
+        print(f"[*] Filtered to last 7 days: {len(events)} events (dropped {before_filter - len(events)} old)")
+
+    # Deduplicate by (session, timestamp, eventid)
+    seen_events = set()
+    unique_events = []
+    for e in events:
+        key = (e.get('session', ''), e.get('timestamp', ''), e.get('eventid', ''))
+        if key not in seen_events:
+            seen_events.add(key)
+            unique_events.append(e)
+    if len(unique_events) < len(events):
+        print(f"[*] After dedup: {len(unique_events)} unique events (removed {len(events) - len(unique_events)} duplicates)")
+    events = unique_events
 
     if not events:
         print("[!] No events found. Generating empty dashboard.")
