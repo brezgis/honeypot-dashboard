@@ -618,5 +618,85 @@
     "lon": 105.834,
     "isp": "Viettel Corporation",
     "org": "VIETEL"
+  },
+  "2.57.121.25": {
+    "country": "United Kingdom",
+    "countryCode": "GB",
+    "region": "England",
+    "city": "Rushden",
+    "lat": 52.2999,
+    "lon": -0.613313,
+    "isp": "Unmanaged LTD",
+    "org": "Unmanaged LTD"
+  },
+  "23.97.62.138": {
+    "country": "Singapore",
+    "countryCode": "SG",
+    "region": "Central Singapore",
+    "city": "Singapore",
+    "lat": 1.283,
+    "lon": 103.833,
+    "isp": "Microsoft Corporation",
+    "org": "Microsoft Azure Cloud (southeastasia)"
+  },
+  "213.209.159.159": {
+    "country": "Germany",
+    "countryCode": "DE",
+    "region": "Bavaria",
+    "city": "Augsburg",
+    "lat": 48.3459,
+    "lon": 10.9161,
+    "isp": "Feo Prest SRL",
+    "org": "Feo Prest SRL"
+  },
+  "91.126.40.196": {
+    "country": "Spain",
+    "countryCode": "ES",
+    "region": "Cantabria",
+    "city": "San Vicente de la Barquera",
+    "lat": 43.3851,
+    "lon": -4.39934,
+    "isp": "Adamo Telecom Iberia S.A Catalonia",
+    "org": "Adamo Telecom Iberia S.A.U"
+  },
+  "91.92.241.59": {
+    "country": "The Netherlands",
+    "countryCode": "NL",
+    "region": "North Holland",
+    "city": "Amsterdam",
+    "lat": 52.3759,
+    "lon": 4.8975,
+    "isp": "Railnet LLC",
+    "org": "Lanedonet Datacenter"
+  },
+  "170.64.167.72": {
+    "country": "Australia",
+    "countryCode": "AU",
+    "region": "New South Wales",
+    "city": "Sydney",
+    "lat": -33.8978,
+    "lon": 151.1899,
+    "isp": "DigitalOcean, LLC",
+    "org": "DigitalOcean, LLC"
+  },
+  "66.132.153.121": {
+    "country": "United States",
+    "countryCode": "US",
+    "region": "Michigan",
+    "city": "Ann Arbor",
+    "lat": 42.2809,
+    "lon": -83.7489,
+    "isp": "Censys, Inc.",
+    "org": "Censys Inc"
+  },
+  "117.72.45.63": {
+    "country": "China",
+    "countryCode": "CN",
+    "region": "Beijing",
+    "city": "Chaowai",
+    "lat": 39.999,
+    "lon": 116.387,
+    "isp": "JDCOM",
+    "org": "Beijing Jingdong 360 Degree E-commerce Co., Ltd."
   }
 }

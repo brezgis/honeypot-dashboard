@@ -67,8 +67,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/", "/dashboard.html", "/index.html"):
-            # Trigger background regeneration
-            regenerate()
+            # Regeneration handled by cron every 5 minutes
+            # regenerate()  # removed — avoid duplicate regeneration
             self.path = "/dashboard.html"
             # Serve whatever HTML we have (even if stale)
             try:

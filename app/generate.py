@@ -132,20 +132,32 @@ def annotate_command(cmd):
     return None
 
 def parse_log(path):
-    """Parse Cowrie JSON log, skipping malformed lines."""
+    """Parse Cowrie JSON log, skipping malformed lines. Handles .gz files."""
+    import gzip
     events = []
     if not os.path.exists(path):
         print(f"[!] Log file not found: {path}")
         return events
-    with open(path, "r") as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                print(f"[!] Skipping malformed JSON at line {lineno}")
+    # Detect gzip by magic bytes, not extension
+    is_gzip = False
+    try:
+        with open(path, "rb") as f:
+            is_gzip = f.read(2) == b'\x1f\x8b'
+    except Exception:
+        pass
+    opener = gzip.open if is_gzip else open
+    try:
+        with opener(path, "rt") as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[!] Skipping malformed JSON at line {lineno}")
+    except Exception as e:
+        print(f"[!] Error reading {path}: {e}")
     return events
 
 
@@ -1734,12 +1746,20 @@ def main():
 
     # Generate HTML
     html = generate_html(data)
-    with open(OUTPUT_PATH, "w") as f:
+    tmp_path = OUTPUT_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
         f.write(html)
+    os.rename(tmp_path, OUTPUT_PATH)
     print(f"[✓] Dashboard written to {OUTPUT_PATH}")
     print(f"    Sessions: {data['stats']['total_sessions']} | Logins: {data['stats']['total_login_attempts']} | "
           f"Success: {data['stats']['successful_logins']} | IPs: {data['stats']['unique_ips']}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print(f"[FATAL] {e}")
+        traceback.print_exc()
+        sys.exit(1)
