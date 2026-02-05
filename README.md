@@ -2,7 +2,7 @@
 
 A Cowrie SSH honeypot disguised as a Solana validator node, with a live web dashboard showing real-time attacker activity.
 
-**Dashboard:** https://samovar-honeypot.duckdns.org (HTTP basic auth required)
+**Dashboard:** https://your-domain.example.com (HTTP basic auth required)
 
 ## Architecture
 
@@ -74,6 +74,6 @@ cd /home/dashboard/app && python3 generate.py
 
 ## Connectivity
 
-- **Reverse tunnel:** autossh maintains a persistent tunnel back to north (home server) on port 2224
+- **Reverse tunnel:** autossh maintains a persistent reverse tunnel to a home server
 - **SSH access:** Port 2222 (root, key-only)
 - **Dashboard also available:** http://<YOUR_SERVER_IP>:8080
