@@ -12,3 +12,4 @@ venv/
 .profile
 .cloud-locale-test.skip
 *.bak
+geoip_cache.json
