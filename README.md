@@ -76,4 +76,4 @@ cd /home/dashboard/app && python3 generate.py
 
 - **Reverse tunnel:** autossh maintains a persistent tunnel back to north (home server) on port 2224
 - **SSH access:** Port 2222 (root, key-only)
-- **Dashboard also available:** http://95.216.166.4:8080
+- **Dashboard also available:** http://<YOUR_SERVER_IP>:8080
