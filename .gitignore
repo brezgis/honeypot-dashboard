@@ -13,3 +13,4 @@ venv/
 .cloud-locale-test.skip
 *.bak
 geoip_cache.json
+app/geoip_cache.json
