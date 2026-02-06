@@ -2,11 +2,18 @@
 """
 Persistent Analytics Store for Cowrie Honeypot Dashboard
 Incrementally processes cowrie JSON logs and maintains aggregated analytics.
+
+Fixes applied (2026-02-06):
+- C3: Atomic writes (temp file + os.rename) for analytics.json
+- H1: 30-day retention pruning for sessions, credentials, IPs, commands
+- H2: File-size-based log rotation detection (replaces fragile line counting)
+- H3: Atomic writes for geoip_cache.json
 """
 
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -18,6 +25,28 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = "/home/cowrie/cowrie/var/log/cowrie/cowrie.json"
 ANALYTICS_PATH = os.path.join(SCRIPT_DIR, "analytics.json")
 GEOIP_CACHE_PATH = os.path.join(SCRIPT_DIR, "geoip_cache.json")
+
+# Retention: prune data older than this
+RETENTION_DAYS = 30
+
+
+def atomic_json_write(filepath, data, indent=2):
+    """Write JSON atomically using temp file + os.rename."""
+    dirpath = os.path.dirname(filepath)
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=indent)
+        os.rename(tmp_path, filepath)
+    except Exception as e:
+        print(f"[!] Atomic write failed for {filepath}: {e}")
+        # Clean up temp file if rename failed
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def load_geoip_cache():
@@ -32,12 +61,9 @@ def load_geoip_cache():
 
 
 def save_geoip_cache(cache):
-    """Save GeoIP cache."""
-    try:
-        with open(GEOIP_CACHE_PATH, "w") as f:
-            json.dump(cache, f, indent=2)
-    except IOError as e:
-        print(f"[!] Failed to save GeoIP cache: {e}")
+    """Save GeoIP cache atomically (H3 fix)."""
+    if not atomic_json_write(GEOIP_CACHE_PATH, cache):
+        print("[!] Failed to save GeoIP cache")
 
 
 def batch_geoip_lookup(ips, cache):
@@ -120,7 +146,8 @@ def load_analytics():
         "sessions": {},
         "daily_summary": {},
         "meta": {
-            "last_processed_line": 0,
+            "last_byte_offset": 0,
+            "last_file_size": 0,
             "total_events_processed": 0,
             "last_updated": None
         }
@@ -128,20 +155,65 @@ def load_analytics():
 
 
 def save_analytics(analytics):
-    """Save analytics data."""
+    """Save analytics data atomically (C3 fix)."""
     analytics["meta"]["last_updated"] = datetime.now(timezone.utc).isoformat()
-    try:
-        with open(ANALYTICS_PATH, "w") as f:
-            json.dump(analytics, f, indent=2)
+    if atomic_json_write(ANALYTICS_PATH, analytics):
         print(f"[*] Analytics saved to {ANALYTICS_PATH}")
-    except IOError as e:
-        print(f"[!] Failed to save analytics: {e}")
+        return True
+    else:
+        print(f"[!] Failed to save analytics")
         return False
-    return True
+
+
+def prune_old_data(analytics):
+    """Remove data older than RETENTION_DAYS (H1 fix)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+    pruned_counts = {"sessions": 0, "credentials": 0, "commands": 0, "ips": 0, "daily_summary": 0}
+
+    # Prune sessions
+    old_sessions = [sid for sid, s in analytics.get("sessions", {}).items()
+                    if s.get("start_time", "") and s["start_time"] < cutoff]
+    for sid in old_sessions:
+        del analytics["sessions"][sid]
+        pruned_counts["sessions"] += 1
+
+    # Prune credentials by last_seen
+    old_creds = [c for c, v in analytics.get("credentials", {}).items()
+                 if v.get("last_seen", "") and v["last_seen"] < cutoff]
+    for c in old_creds:
+        del analytics["credentials"][c]
+        pruned_counts["credentials"] += 1
+
+    # Prune commands by last_seen
+    old_cmds = [c for c, v in analytics.get("commands", {}).items()
+                if v.get("last_seen", "") and v["last_seen"] < cutoff]
+    for c in old_cmds:
+        del analytics["commands"][c]
+        pruned_counts["commands"] += 1
+
+    # Prune IPs by last_seen
+    old_ips = [ip for ip, v in analytics.get("ips", {}).items()
+               if v.get("last_seen", "") and v["last_seen"] < cutoff]
+    for ip in old_ips:
+        del analytics["ips"][ip]
+        pruned_counts["ips"] += 1
+
+    # Prune daily summaries older than retention
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    old_days = [d for d in analytics.get("daily_summary", {}) if d < cutoff_date]
+    for d in old_days:
+        del analytics["daily_summary"][d]
+        pruned_counts["daily_summary"] += 1
+
+    total_pruned = sum(pruned_counts.values())
+    if total_pruned > 0:
+        print(f"[*] Pruned {total_pruned} old entries: {pruned_counts}")
+
+    return analytics
 
 
 def process_new_events():
-    """Process new events from the cowrie log."""
+    """Process new events from the cowrie log using byte offsets (H2 fix)."""
     if not os.path.exists(LOG_PATH):
         print(f"[!] Log file not found: {LOG_PATH}")
         return
@@ -149,45 +221,72 @@ def process_new_events():
     # Load existing data
     analytics = load_analytics()
     geoip_cache = load_geoip_cache()
+
+    # Migrate from old line-based tracking to byte offsets
+    if "last_processed_line" in analytics.get("meta", {}):
+        print("[*] Migrating from line-based to byte-offset tracking")
+        analytics["meta"].pop("last_processed_line", None)
+        # Start fresh from beginning on migration
+        analytics["meta"]["last_byte_offset"] = 0
+        analytics["meta"]["last_file_size"] = 0
+
+    last_offset = analytics["meta"].get("last_byte_offset", 0)
+    last_file_size = analytics["meta"].get("last_file_size", 0)
     
-    last_processed = analytics["meta"]["last_processed_line"]
+    # Get current file size
+    try:
+        current_size = os.path.getsize(LOG_PATH)
+    except OSError as e:
+        print(f"[!] Cannot stat log file: {e}")
+        return
+
+    # Log rotation detection: file smaller than last known size (H2 fix)
+    if current_size < last_file_size:
+        print(f"[*] Log rotation detected (size {current_size} < last {last_file_size}), resetting offset")
+        last_offset = 0
+
+    # Nothing new
+    if current_size <= last_offset:
+        print(f"[*] No new data (file size {current_size}, offset {last_offset})")
+        # Still prune and save
+        analytics = prune_old_data(analytics)
+        save_analytics(analytics)
+        return
+
     events_processed = 0
     new_ips = set()
-    
-    print(f"[*] Processing events from line {last_processed + 1}")
-    
+
+    print(f"[*] Processing events from byte offset {last_offset} (file size: {current_size})")
+
     try:
         with open(LOG_PATH, "r") as f:
-            # Skip already processed lines
-            for i in range(last_processed):
-                f.readline()
-            
-            current_line = last_processed
+            f.seek(last_offset)
             for line in f:
-                current_line += 1
                 line = line.strip()
                 if not line:
                     continue
-                
                 try:
                     event = json.loads(line)
                     process_event(event, analytics, new_ips)
                     events_processed += 1
-                    
-                    # Update progress every 1000 events
+
                     if events_processed % 1000 == 0:
                         print(f"[*] Processed {events_processed} events...")
-                        
+
                 except json.JSONDecodeError:
-                    print(f"[!] Skipping malformed JSON at line {current_line}")
+                    # First line after seek may be partial — skip gracefully
+                    if events_processed == 0 and last_offset > 0:
+                        continue
+                    print(f"[!] Skipping malformed JSON line")
                     continue
-            
-            analytics["meta"]["last_processed_line"] = current_line
-            analytics["meta"]["total_events_processed"] += events_processed
-    
     except IOError as e:
         print(f"[!] Failed to read log file: {e}")
         return
+
+    # Update byte offset to actual file size (not computed from content)
+    analytics["meta"]["last_byte_offset"] = current_size
+    analytics["meta"]["last_file_size"] = current_size
+    analytics["meta"]["total_events_processed"] += events_processed
     
     # Perform GeoIP lookups for new IPs
     if new_ips:
@@ -207,7 +306,10 @@ def process_new_events():
     # Generate daily summary
     generate_daily_summaries(analytics)
     
-    # Save results
+    # Prune old data (H1 fix)
+    analytics = prune_old_data(analytics)
+
+    # Save results atomically (C3 fix)
     save_analytics(analytics)
     print(f"[*] Processed {events_processed} new events, {len(new_ips)} new IPs")
 
@@ -243,7 +345,6 @@ def process_event(event, analytics, new_ips):
     
     # Process different event types
     if eventid == "cowrie.session.connect":
-        # Track session start
         if session not in analytics["sessions"]:
             analytics["sessions"][session] = {
                 "ip": src_ip,
@@ -255,12 +356,10 @@ def process_event(event, analytics, new_ips):
             }
     
     elif eventid == "cowrie.session.closed":
-        # Track session end
         if session in analytics["sessions"]:
             analytics["sessions"][session]["end_time"] = timestamp
     
     elif eventid in ["cowrie.login.failed", "cowrie.login.success"]:
-        # Track credentials
         username = event.get("username", "")
         password = event.get("password", "")
         credential = f"{username}:{password}"
@@ -279,7 +378,6 @@ def process_event(event, analytics, new_ips):
         if success:
             analytics["credentials"][credential]["success"] = True
         
-        # Track in session
         if session in analytics["sessions"]:
             analytics["sessions"][session]["credentials_tried"].append({
                 "credential": credential,
@@ -292,7 +390,6 @@ def process_event(event, analytics, new_ips):
                     analytics["ips"][src_ip]["successful_logins"] += 1
     
     elif eventid == "cowrie.command.input":
-        # Track commands
         command = event.get("input", "").strip()
         if command:
             if command not in analytics["commands"]:
@@ -305,14 +402,12 @@ def process_event(event, analytics, new_ips):
             analytics["commands"][command]["count"] += 1
             analytics["commands"][command]["last_seen"] = timestamp
             
-            # Track in session
             if session in analytics["sessions"]:
                 analytics["sessions"][session]["commands"].append({
                     "command": command,
                     "timestamp": timestamp
                 })
             
-            # Update IP command count
             if src_ip in analytics["ips"]:
                 analytics["ips"][src_ip]["commands_run"] += 1
 
@@ -329,14 +424,13 @@ def generate_daily_summaries(analytics):
         "ips": defaultdict(int)
     })
     
-    # Process sessions for daily summaries
     for session_id, session in analytics["sessions"].items():
         if not session["start_time"]:
             continue
             
         try:
             date = datetime.fromisoformat(session["start_time"].replace("Z", "+00:00")).date().isoformat()
-        except:
+        except (ValueError, TypeError):
             continue
             
         day = daily_data[date]
@@ -346,18 +440,15 @@ def generate_daily_summaries(analytics):
             day["unique_ips"].add(session["ip"])
             day["ips"][session["ip"]] += 1
         
-        # Count login attempts and successes
         for cred_attempt in session["credentials_tried"]:
             day["login_attempts"] += 1
             day["credentials"][cred_attempt["credential"]] += 1
             if cred_attempt["success"]:
                 day["successful"] += 1
         
-        # Count unique commands
         for cmd in session["commands"]:
             day["unique_commands"].add(cmd["command"])
     
-    # Convert to final format
     for date, data in daily_data.items():
         top_credential = max(data["credentials"].items(), key=lambda x: x[1]) if data["credentials"] else ("", 0)
         top_ip = max(data["ips"].items(), key=lambda x: x[1]) if data["ips"] else ("", 0)

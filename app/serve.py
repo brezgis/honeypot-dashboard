@@ -96,7 +96,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(msg)
                 return
-        super().do_GET()
+        self.send_error(404, "Not found")
+        return
 
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] {format % args}")

