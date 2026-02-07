@@ -270,6 +270,10 @@ The description system uses a 3-layer approach for efficiency:
 
 The prompt uses a raw/few-shot format with real examples to guide the model toward concise, technical, opinionated descriptions. Bad outputs (meta-commentary, refusals, too-short responses) are detected and filtered.
 
+## Made by
+
+Anna Brezgis and Claude — [brezgis.com](https://brezgis.com)
+
 ## License
 
 MIT
