@@ -536,7 +536,7 @@ def analyze_events(events, geo_cache):
 
     markers = []
     seen_ips = set()
-    for ip, count in ip_attempts.most_common(500):
+    for ip, count in ip_attempts.most_common(100):
         if ip in seen_ips:
             continue
         seen_ips.add(ip)
@@ -547,11 +547,6 @@ def analyze_events(events, geo_cache):
             continue
         creds_tried = list(set(ip_creds.get(ip, [])))[:10]
         nickname = generate_nickname(ip, geo, ip_creds.get(ip, []))
-        # Build per-day counts for this IP
-        ip_daily = {}
-        for day_k, day_counter in daily_ip_attempts.items():
-            if ip in day_counter:
-                ip_daily[day_k] = day_counter[ip]
         markers.append({
             "ip": ip,
             "lat": lat,
@@ -562,9 +557,6 @@ def analyze_events(events, geo_cache):
             "isp": geo.get("isp", "Unknown"),
             "creds": creds_tried,
             "nickname": nickname,
-            "first_seen": ip_first_seen.get(ip, ""),
-            "last_seen": ip_last_seen.get(ip, ""),
-            "daily_counts": ip_daily,
         })
 
     for ip in list(set(session_ips.values())):
@@ -606,7 +598,7 @@ def analyze_events(events, geo_cache):
     ), reverse=True)
 
     daily_breakdown = []
-    for day in all_days:
+    for day in all_days[:30]:
         top_ip = ""
         top_nick = ""
         if daily_ip_attempts[day]:
@@ -986,7 +978,6 @@ def generate_html(data):
     geo_cache = data.get("geo_cache", {})
     ip_creds = data.get("ip_creds", {})
     markers_json = json.dumps(data["markers"])
-    daily_breakdown_json = json.dumps(data["daily_breakdown"])
     top_creds_labels = json.dumps([c[0] for c in data["top_creds"][:15]])
     top_creds_data = json.dumps([c[1] for c in data["top_creds"][:15]])
     timeline_labels = json.dumps(data["timeline_labels"])
@@ -1509,14 +1500,7 @@ def generate_html(data):
 
   <div class="grid full">
     <div class="panel" style="overflow:visible;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:15px;">
-        <h2 style="margin-bottom:0;">\U0001f30d Attack Origins</h2>
-        <div style="display:flex;align-items:center;gap:10px;">
-          <button onclick="changeWeek(-1)" id="weekPrev" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&larr;</button>
-          <span id="weekLabel" style="color:#888;font-size:0.85em;font-family:'JetBrains Mono',monospace;min-width:140px;text-align:center;"></span>
-          <button onclick="changeWeek(1)" id="weekNext" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&rarr;</button>
-        </div>
-      </div>
+      <h2>\U0001f30d Attack Origins</h2>
       <div id="map"></div>
     </div>
   </div>
@@ -1554,8 +1538,7 @@ def generate_html(data):
       <canvas id="credsChart"></canvas>
     </div>
     <div class="panel">
-      <h2 style="margin-bottom:0;">\U0001f4c8 Attack Timeline</h2>
-      <div id="timelineWeekLabel" style="color:#888;font-size:0.75em;margin-bottom:10px;font-family:'JetBrains Mono',monospace;"></div>
+      <h2>\U0001f4c8 Attack Timeline</h2>
       <canvas id="timelineChart"></canvas>
     </div>
   </div>
@@ -1563,7 +1546,7 @@ def generate_html(data):
   <div class="grid full">
     <div class="panel">
       <h2>\U0001f4ca Daily Breakdown</h2>
-      <div id="dailyBreakdown" style="overflow-x:auto; max-height:400px; overflow-y:auto;">
+      <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
         <table>
           <tr><th>Date</th><th>Sessions</th><th class="hide-mobile">Login Attempts</th><th>Successful</th><th>Unique IPs</th><th class="hide-mobile">Commands</th><th class="hide-mobile">Top Attacker</th></tr>
           {daily_rows}
@@ -1630,194 +1613,47 @@ def generate_html(data):
 
   var markerLookup = {{}};
   var pulseMarkers = [];
-  var allMarkers = {markers_json};
-  var allTimelineLabels = {timeline_labels};
-  var allTimelineData = {timeline_data};
-  var allDailyBreakdown = {daily_breakdown_json};
+  var markers = {markers_json};
+  markers.forEach(function(m) {{
+    var baseRadius = Math.max(6, Math.min(22, m.count * 2));
+    var phase = Math.random() * Math.PI * 2;
 
-  // Weekly pagination state
-  var weekOffset = 0; // 0 = current week, -1 = last week, etc.
+    var ring = L.circleMarker([m.lat, m.lon], {{
+      radius: baseRadius * 1.8,
+      fillColor: '#ff4444',
+      fillOpacity: 0,
+      color: '#ff4444',
+      weight: 2,
+      opacity: 0.4
+    }}).addTo(map);
 
-  function getWeekRange(offset) {{
-    var now = new Date();
-    // Find Monday of current week
-    var day = now.getDay();
-    var diffToMonday = (day === 0 ? 6 : day - 1);
-    var monday = new Date(now);
-    monday.setDate(now.getDate() - diffToMonday + (offset * 7));
-    monday.setHours(0,0,0,0);
-    var sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    sunday.setHours(23,59,59,999);
-    return {{ start: monday, end: sunday }};
-  }}
+    var dot = L.circleMarker([m.lat, m.lon], {{
+      radius: baseRadius,
+      fillColor: '#ff4444',
+      fillOpacity: 0.7,
+      color: '#ff6666',
+      weight: 2,
+      opacity: 0.9
+    }}).addTo(map);
 
-  function fmtDate(d) {{
-    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
-  }}
+    pulseMarkers.push({{ ring: ring, dot: dot, baseRadius: baseRadius, phase: phase }});
 
-  function dateStr(d) {{
-    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
-  }}
+    var credsHtml = m.creds.length > 0
+      ? '<br><span class="popup-label">Creds tried:</span><br>' + m.creds.map(function(c) {{ return '&nbsp;&nbsp;' + c; }}).join('<br>')
+      : '';
 
-  function getMinWeekOffset() {{
-    // Find the earliest date in our data
-    var minDate = null;
-    allMarkers.forEach(function(m) {{
-      if (m.first_seen) {{
-        var d = new Date(m.first_seen);
-        if (!minDate || d < minDate) minDate = d;
-      }}
-    }});
-    allDailyBreakdown.forEach(function(d) {{
-      var dt = new Date(d.date + 'T00:00:00');
-      if (!minDate || dt < minDate) minDate = dt;
-    }});
-    if (!minDate) return 0;
-    var now = new Date();
-    var diffDays = Math.floor((now - minDate) / (1000*60*60*24));
-    return -Math.ceil(diffDays / 7);
-  }}
+    dot.bindPopup(
+      '<span style="color:#ff4444;font-weight:bold;font-size:14px">' + (m.nickname || '?') + '</span><br>' +
+      '<span class="popup-ip">' + m.ip + '</span><br>' +
+      '<span class="popup-label">Location:</span> ' + (m.city ? m.city + ', ' : '') + m.country + '<br>' +
+      '<span class="popup-label">ISP:</span> ' + m.isp + '<br>' +
+      '<span class="popup-label">Attempts:</span> <strong>' + m.count + '</strong>' +
+      credsHtml
+    );
 
-  var mapMarkerLayers = [];
-
-  function updateWeekDisplay() {{
-    var range = getWeekRange(weekOffset);
-    var label = fmtDate(range.start) + ' \u2013 ' + fmtDate(range.end);
-    document.getElementById('weekLabel').textContent = label;
-    document.getElementById('timelineWeekLabel').textContent = label;
-
-    // Disable next button if at current week
-    document.getElementById('weekNext').disabled = (weekOffset >= 0);
-    document.getElementById('weekNext').style.opacity = (weekOffset >= 0) ? '0.3' : '1';
-    var minOff = getMinWeekOffset();
-    document.getElementById('weekPrev').disabled = (weekOffset <= minOff);
-    document.getElementById('weekPrev').style.opacity = (weekOffset <= minOff) ? '0.3' : '1';
-
-    updateMapMarkers(range);
-    updateTimeline(range);
-    updateDailyBreakdown(range);
-  }}
-
-  function updateMapMarkers(range) {{
-    // Remove old markers
-    mapMarkerLayers.forEach(function(l) {{ map.removeLayer(l); }});
-    mapMarkerLayers = [];
-    pulseMarkers = [];
-    markerLookup = {{}};
-
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
-
-    allMarkers.forEach(function(m) {{
-      // Sum counts for this week only
-      var weekCount = 0;
-      if (m.daily_counts) {{
-        Object.keys(m.daily_counts).forEach(function(day) {{
-          if (day >= startStr && day <= endStr) {{
-            weekCount += m.daily_counts[day];
-          }}
-        }});
-      }}
-      if (weekCount === 0) return; // Skip markers with no activity this week
-
-      var baseRadius = Math.max(6, Math.min(22, weekCount * 2));
-      var phase = Math.random() * Math.PI * 2;
-
-      var ring = L.circleMarker([m.lat, m.lon], {{
-        radius: baseRadius * 1.8,
-        fillColor: '#ff4444',
-        fillOpacity: 0,
-        color: '#ff4444',
-        weight: 2,
-        opacity: 0.4
-      }}).addTo(map);
-
-      var dot = L.circleMarker([m.lat, m.lon], {{
-        radius: baseRadius,
-        fillColor: '#ff4444',
-        fillOpacity: 0.7,
-        color: '#ff6666',
-        weight: 2,
-        opacity: 0.9
-      }}).addTo(map);
-
-      mapMarkerLayers.push(ring);
-      mapMarkerLayers.push(dot);
-      pulseMarkers.push({{ ring: ring, dot: dot, baseRadius: baseRadius, phase: phase }});
-
-      var credsHtml = m.creds.length > 0
-        ? '<br><span class="popup-label">Creds tried:</span><br>' + m.creds.map(function(c) {{ return '&nbsp;&nbsp;' + c; }}).join('<br>')
-        : '';
-
-      dot.bindPopup(
-        '<span style="color:#ff4444;font-weight:bold;font-size:14px">' + (m.nickname || '?') + '</span><br>' +
-        '<span class="popup-ip">' + m.ip + '</span><br>' +
-        '<span class="popup-label">Location:</span> ' + (m.city ? m.city + ', ' : '') + m.country + '<br>' +
-        '<span class="popup-label">ISP:</span> ' + m.isp + '<br>' +
-        '<span class="popup-label">Attempts:</span> <strong>' + weekCount + '</strong>' +
-        credsHtml
-      );
-
-      if (m.nickname) markerLookup[m.nickname] = dot;
-      markerLookup[m.ip] = dot;
-    }});
-  }}
-
-  var timelineChart = null;
-
-  function updateTimeline(range) {{
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
-    var filteredLabels = [];
-    var filteredData = [];
-    for (var i = 0; i < allTimelineLabels.length; i++) {{
-      // Timeline labels are like "2026-02-07 14:00 EST"
-      var dayPart = allTimelineLabels[i].substring(0, 10);
-      if (dayPart >= startStr && dayPart <= endStr) {{
-        filteredLabels.push(allTimelineLabels[i]);
-        filteredData.push(allTimelineData[i]);
-      }}
-    }}
-
-    if (timelineChart) {{
-      timelineChart.data.labels = filteredLabels;
-      timelineChart.data.datasets[0].data = filteredData;
-      timelineChart.update();
-    }}
-  }}
-
-  function updateDailyBreakdown(range) {{
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
-    var container = document.getElementById('dailyBreakdown');
-    var html = '<table><tr><th>Date</th><th>Sessions</th><th class="hide-mobile">Login Attempts</th><th>Successful</th><th>Unique IPs</th><th class="hide-mobile">Commands</th><th class="hide-mobile">Top Attacker</th></tr>';
-    allDailyBreakdown.forEach(function(d) {{
-      if (d.date >= startStr && d.date <= endStr) {{
-        var attackerCell = d.top_attacker_ip
-          ? '<span class="nick-link" onclick="flyToAttacker(\'' + d.top_attacker_nick + '\')">' + d.top_attacker_nick + '</span> <span style="color:#555">(' + d.top_attacker_ip + ')</span>'
-          : '<span style="color:#555">\u2014</span>';
-        html += '<tr><td class="glow">' + d.date + '</td><td>' + d.sessions + '</td><td class="hide-mobile">' + d.login_attempts + '</td><td>' + d.successful + '</td><td>' + d.unique_ips + '</td><td class="hide-mobile">' + d.commands + '</td><td class="hide-mobile">' + attackerCell + '</td></tr>';
-      }}
-    }});
-    html += '</table>';
-    container.innerHTML = html;
-  }}
-
-  window.changeWeek = function(dir) {{
-    var minOff = getMinWeekOffset();
-    var newOffset = weekOffset + dir;
-    if (newOffset > 0) newOffset = 0;
-    if (newOffset < minOff) newOffset = minOff;
-    if (newOffset !== weekOffset) {{
-      weekOffset = newOffset;
-      updateWeekDisplay();
-    }}
-  }};
-
-  // Render markers for current week (updateWeekDisplay handles filtering)
-  updateWeekDisplay();
+    if (m.nickname) markerLookup[m.nickname] = dot;
+    markerLookup[m.ip] = dot;
+  }});
 
   function animatePulse() {{
     var t = Date.now() / 1000;
@@ -1876,7 +1712,7 @@ def generate_html(data):
   }});
 
   // Timeline chart
-  timelineChart = new Chart(document.getElementById('timelineChart'), {{
+  new Chart(document.getElementById('timelineChart'), {{
     type: 'line',
     data: {{
       labels: {timeline_labels},
@@ -1928,13 +1764,13 @@ def main():
             events.extend(parse_log(lf))
     print(f"[*] Loaded {len(events)} events from {len(log_files)} files")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     before_filter = len(events)
     events = [e for e in events if datetime.fromisoformat(
         e.get('timestamp', '2000-01-01T00:00:00').replace('Z', '+00:00')
     ) > cutoff]
     if len(events) < before_filter:
-        print(f"[*] Filtered to last 60 days: {len(events)} events (dropped {before_filter - len(events)} old)")
+        print(f"[*] Filtered to last 7 days: {len(events)} events (dropped {before_filter - len(events)} old)")
 
     seen_events = set()
     unique_events = []
