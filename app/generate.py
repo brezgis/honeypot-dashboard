@@ -298,6 +298,16 @@ COUNTRY_FLAVORS = {
 }
 DEFAULT_FLAVORS = ["ghost", "shadow", "phantom", "specter", "wraith", "cipher", "rogue"]
 
+BORING_CREDS = {
+    "root:root", "admin:admin", "admin:password", "admin:123456", "root:123456",
+    "user:user", "test:test", "admin:admin123", "root:password", "admin:1234",
+    "root:1234", "root:admin", "guest:guest", "admin:12345", "root:12345",
+    "root:toor", "admin:admin1", "root:root123", "admin:default", "root:default",
+    "ubuntu:ubuntu", "user:password", "test:123456", "admin:1q2w3e4r", "root:1q2w3e4r",
+    "support:support", "user:123456", "pi:raspberry", "admin:pass", "root:pass",
+    "admin:123", "root:123", "test:test123", "root:1234567890", "admin:1234567890",
+}
+
 _nickname_cache = {}
 _nickname_counter = Counter()
 
@@ -404,6 +414,7 @@ def analyze_events(events, geo_cache):
     session_success = set()
     session_creds = {}
 
+    hourly_attempts = Counter()
     daily_sessions = Counter()
     daily_login_attempts = Counter()
     daily_successful = Counter()
@@ -462,6 +473,7 @@ def analyze_events(events, geo_cache):
                 dt_local = dt.astimezone(LOCAL_TZ)
                 bucket = dt_local.strftime("%Y-%m-%d %H:00 ") + dt_local.strftime("%Z")
                 timeline[bucket] += 1
+                hourly_attempts[dt_local.hour] += 1
             except (ValueError, AttributeError):
                 pass
             recent_events.append({"ts": ts, "ip": ip, "action": f"Login attempt: {h(u)}/{h(p)}"})
@@ -492,6 +504,7 @@ def analyze_events(events, geo_cache):
                 dt_local = dt.astimezone(LOCAL_TZ)
                 bucket = dt_local.strftime("%Y-%m-%d %H:00 ") + dt_local.strftime("%Z")
                 timeline[bucket] += 1
+                hourly_attempts[dt_local.hour] += 1
             except (ValueError, AttributeError):
                 pass
             recent_events.append({"ts": ts, "ip": ip, "action": f"\u2705 LOGIN SUCCESS: {h(u)}/{h(p)}"})
@@ -648,6 +661,18 @@ def analyze_events(events, geo_cache):
         "success_rate": round(stats["successful_logins"] / max(1, stats["total_login_attempts"]) * 100, 1),
     }
 
+    # Compute fun all-time stats
+    unique_countries = set()
+    for ip_key in ip_attempts:
+        geo = geo_cache.get(ip_key, {})
+        cc = geo.get("country", "Unknown")
+        if cc != "Unknown":
+            unique_countries.add(cc)
+
+    busiest_day = max(daily_login_attempts.items(), key=lambda x: x[1]) if daily_login_attempts else ("", 0)
+    peak_hour = max(hourly_attempts.items(), key=lambda x: x[1])[0] if hourly_attempts else 0
+    peak_hour_str = f"{peak_hour:02d}:00–{(peak_hour+1)%24:02d}:00"
+
     return {
         "stats": stats,
         "today_stats": today_stats,
@@ -666,6 +691,9 @@ def analyze_events(events, geo_cache):
         "ip_creds": dict(ip_creds),
         "ip_first_seen": ip_first_seen,
         "ip_last_seen": ip_last_seen,
+        "unique_countries": len(unique_countries),
+        "busiest_day": busiest_day,
+        "peak_hour": peak_hour_str,
         "generated": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
     }
 
@@ -1755,18 +1783,13 @@ def generate_html(data):
   <div class="grid full">
     <div class="panel">
       <h2>\U0001f4ca All-Time Stats</h2>
-      <div style="overflow-x:auto;">
-        <table>
-          <tr><th>Metric</th><th>Total</th><th>Avg / Day</th></tr>
-          <tr><td>Sessions</td><td class="glow">{stats['total_sessions']}</td><td>{data['averages']['sessions_per_day']}</td></tr>
-          <tr><td>Login Attempts</td><td class="glow">{stats['total_login_attempts']}</td><td>{data['averages']['logins_per_day']}</td></tr>
-          <tr><td>Successful Logins</td><td class="glow">{stats['successful_logins']}</td><td>{data['averages']['successful_per_day']}</td></tr>
-          <tr><td>Unique IPs</td><td class="glow">{stats['unique_ips']}</td><td>{data['averages']['ips_per_day']}</td></tr>
-          <tr><td>Commands Executed</td><td class="glow">{stats['commands_executed']}</td><td>{data['averages']['commands_per_day']}</td></tr>
-          <tr><td>Days Active</td><td class="glow" colspan="2">{data['days_active']}</td></tr>
-          <tr><td>Success Rate</td><td class="glow" colspan="2">{data['averages']['success_rate']}%</td></tr>
-        </table>
+      <div class="alltime-bar" style="background:transparent;border:none;padding:0;">
+        <div class="alltime-stat"><div class="alltime-value">{data['attacks_per_day']}</div><div class="alltime-label">Attacks / Day</div></div>
+        <div class="alltime-stat"><div class="alltime-value">{data['unique_countries']}</div><div class="alltime-label">Countries Seen</div></div>
+        <div class="alltime-stat"><div class="alltime-value">{data['peak_hour']}</div><div class="alltime-label">Peak Hour (ET)</div></div>
+        <div class="alltime-stat"><div class="alltime-value">{data['busiest_day'][0][5:] if data['busiest_day'][0] else '\u2014'}</div><div class="alltime-label">Busiest Day ({data['busiest_day'][1]} attempts)</div></div>
       </div>
+      <div style="text-align:center;color:#444;font-size:0.7em;margin-top:8px;">{stats['total_login_attempts']:,} total attempts across {data['days_active']} days \u00b7 {data['averages']['success_rate']}% success rate</div>
     </div>
   </div>
 
