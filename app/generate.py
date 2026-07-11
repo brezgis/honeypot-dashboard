@@ -356,9 +356,9 @@ CACHE_PATH = os.path.join(DATA_DIR, "geoip_cache.json")
 OUTPUT_PATH = os.path.join(DATA_DIR, "dashboard.html")
 CACHE_FILE = os.path.join(DATA_DIR, "description_cache.json")
 
-# Max attacker IPs plotted on the map. The map filters per-week client-side, so
+# Max attacker IPs plotted on the map. The map filters per-day client-side, so
 # this only bounds page size; set well above the ~5–6k unique IPs in a 60-day
-# window so recent weeks (newer, lower-volume IPs) aren't dropped off the map.
+# window so recent days (newer, lower-volume IPs) aren't dropped off the map.
 MAX_MAP_MARKERS = int(os.environ.get("MAX_MAP_MARKERS", "10000"))
 
 
@@ -1152,6 +1152,7 @@ def analyze_events(events, geo_cache):
         "top_creds": top_creds,
         "timeline_labels": timeline_labels,
         "timeline_data": timeline_data,
+        "data_today": today_est,
         "recent_events": recent_events,
         "markers": markers,
         "successful_sessions": success_data,
@@ -1670,6 +1671,7 @@ def generate_html(data):
     top_creds_data = json.dumps([c[1] for c in data["top_creds"][:15]])
     timeline_labels = json.dumps(data["timeline_labels"])
     timeline_data = json.dumps(data["timeline_data"])
+    data_today_json = json.dumps(data.get("data_today", ""))
 
     # H1/H3 fix: load cache once, share between both LLM generation passes, save once at end
     print("[*] Loading description cache...")
@@ -2285,9 +2287,9 @@ def generate_html(data):
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:15px;">
         <h2 style="margin-bottom:0;">\U0001f30d Attack Origins</h2>
         <div style="display:flex;align-items:center;gap:10px;">
-          <button onclick="changeWeek(-1)" id="weekPrev" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&larr;</button>
-          <span id="weekLabel" style="color:#888;font-size:0.85em;font-family:'JetBrains Mono',monospace;min-width:140px;text-align:center;"></span>
-          <button onclick="changeWeek(1)" id="weekNext" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&rarr;</button>
+          <button onclick="changeDay(-1)" id="dayPrev" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&larr;</button>
+          <span id="dayLabel" style="color:#888;font-size:0.85em;font-family:'JetBrains Mono',monospace;min-width:140px;text-align:center;"></span>
+          <button onclick="changeDay(1)" id="dayNext" style="background:none;border:1px solid #333;color:#888;font-size:1.2em;cursor:pointer;padding:4px 10px;border-radius:4px;font-family:monospace;">&rarr;</button>
         </div>
       </div>
       <div id="map"></div>
@@ -2328,7 +2330,7 @@ def generate_html(data):
     </div>
     <div class="panel">
       <h2 style="margin-bottom:0;">\U0001f4c8 Attack Timeline</h2>
-      <div id="timelineWeekLabel" style="color:#888;font-size:0.75em;margin-bottom:10px;font-family:'JetBrains Mono',monospace;"></div>
+      <div id="timelineDayLabel" style="color:#888;font-size:0.75em;margin-bottom:10px;font-family:'JetBrains Mono',monospace;"></div>
       <canvas id="timelineChart"></canvas>
     </div>
   </div>
@@ -2408,23 +2410,23 @@ def generate_html(data):
   var allTimelineData = {timeline_data};
   var allDailyBreakdown = {daily_breakdown_json};
 
-  // Weekly pagination state. Persisted across the page's auto-refresh so you
-  // aren't yanked back to the current week while browsing older data.
-  var weekOffset = parseInt(localStorage.getItem('hpd_weekOffset'), 10);
-  if (isNaN(weekOffset) || weekOffset > 0) weekOffset = 0;
+  // Daily pagination state. Persisted across reloads so you aren't yanked
+  // back to today while browsing older data. A week of markers was too dense
+  // to read, so the map/timeline page through one day at a time.
+  localStorage.removeItem('hpd_weekOffset');
+  var dayOffset = parseInt(localStorage.getItem('hpd_dayOffset'), 10);
+  if (isNaN(dayOffset) || dayOffset > 0) dayOffset = 0;
 
-  function getWeekRange(offset) {{
-    var now = new Date();
-    // Find Monday of current week
-    var day = now.getDay();
-    var diffToMonday = (day === 0 ? 6 : day - 1);
-    var monday = new Date(now);
-    monday.setDate(now.getDate() - diffToMonday + (offset * 7));
-    monday.setHours(0,0,0,0);
-    var sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    sunday.setHours(23,59,59,999);
-    return {{ start: monday, end: sunday }};
+  // Day boundaries follow the server's timezone (the data's day keys), not
+  // the viewer's clock — otherwise "today" can point at a day with no data.
+  var dataToday = {data_today_json};
+  if (!dataToday) dataToday = dateStr(new Date());
+
+  function dayFromOffset(offset) {{
+    var parts = dataToday.split('-');
+    var d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+    d.setDate(d.getDate() + offset);
+    return d;
   }}
 
   function fmtDate(d) {{
@@ -2436,68 +2438,55 @@ def generate_html(data):
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   }}
 
-  function getMinWeekOffset() {{
-    // Find the earliest date in our data
-    var minDate = null;
+  // Earliest day present in the data; the data is static per page load, so
+  // compute once. Offsets are day counts relative to dataToday (<= 0).
+  var minDayOffset = (function() {{
+    var minDay = null;
+    function consider(day) {{
+      if (day && (!minDay || day < minDay)) minDay = day;
+    }}
     allMarkers.forEach(function(m) {{
-      if (m.first_seen) {{
-        var d = new Date(m.first_seen);
-        if (!minDate || d < minDate) minDate = d;
-      }}
+      Object.keys(m.daily_counts || {{}}).forEach(consider);
     }});
-    allDailyBreakdown.forEach(function(d) {{
-      var dt = new Date(d.date + 'T00:00:00');
-      if (!minDate || dt < minDate) minDate = dt;
-    }});
-    if (!minDate) return 0;
-    var now = new Date();
-    var diffDays = Math.floor((now - minDate) / (1000*60*60*24));
-    return -Math.ceil(diffDays / 7);
-  }}
+    allDailyBreakdown.forEach(function(d) {{ consider(d.date); }});
+    if (!minDay) return 0;
+    // UTC arithmetic so DST transitions can't skew the day count
+    var diffDays = Math.round(
+      (new Date(dataToday + 'T00:00:00Z') - new Date(minDay + 'T00:00:00Z')) / 86400000);
+    return -Math.max(0, diffDays);
+  }})();
 
   var mapMarkerLayers = [];
 
-  function updateWeekDisplay() {{
-    var range = getWeekRange(weekOffset);
-    var label = fmtDate(range.start) + ' \u2013 ' + fmtDate(range.end);
-    document.getElementById('weekLabel').textContent = label;
-    document.getElementById('timelineWeekLabel').textContent = label;
+  function updateDayDisplay() {{
+    var day = dayFromOffset(dayOffset);
+    var label = fmtDate(day);
+    document.getElementById('dayLabel').textContent = label;
+    document.getElementById('timelineDayLabel').textContent = label;
 
-    // Disable next button if at current week
-    document.getElementById('weekNext').disabled = (weekOffset >= 0);
-    document.getElementById('weekNext').style.opacity = (weekOffset >= 0) ? '0.3' : '1';
-    var minOff = getMinWeekOffset();
-    document.getElementById('weekPrev').disabled = (weekOffset <= minOff);
-    document.getElementById('weekPrev').style.opacity = (weekOffset <= minOff) ? '0.3' : '1';
+    // Disable next button if at today
+    document.getElementById('dayNext').disabled = (dayOffset >= 0);
+    document.getElementById('dayNext').style.opacity = (dayOffset >= 0) ? '0.3' : '1';
+    document.getElementById('dayPrev').disabled = (dayOffset <= minDayOffset);
+    document.getElementById('dayPrev').style.opacity = (dayOffset <= minDayOffset) ? '0.3' : '1';
 
-    updateMapMarkers(range);
-    updateTimeline(range);
-    updateDailyBreakdown(range);
+    var dayKey = dateStr(day);
+    updateMapMarkers(dayKey);
+    updateTimeline(dayKey);
   }}
 
-  function updateMapMarkers(range) {{
+  function updateMapMarkers(dayKey) {{
     // Remove old markers
     mapMarkerLayers.forEach(function(l) {{ map.removeLayer(l); }});
     mapMarkerLayers = [];
     pulseMarkers = [];
     markerLookup = {{}};
 
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
-
     allMarkers.forEach(function(m) {{
-      // Sum counts for this week only
-      var weekCount = 0;
-      if (m.daily_counts) {{
-        Object.keys(m.daily_counts).forEach(function(day) {{
-          if (day >= startStr && day <= endStr) {{
-            weekCount += m.daily_counts[day];
-          }}
-        }});
-      }}
-      if (weekCount === 0) return; // Skip markers with no activity this week
+      var dayCount = (m.daily_counts && m.daily_counts[dayKey]) || 0;
+      if (dayCount === 0) return; // Skip markers with no activity this day
 
-      var baseRadius = Math.max(6, Math.min(22, weekCount * 2));
+      var baseRadius = Math.max(6, Math.min(22, dayCount * 2));
       var phase = Math.random() * Math.PI * 2;
 
       var ring = L.circleMarker([m.lat, m.lon], {{
@@ -2531,7 +2520,7 @@ def generate_html(data):
         '<span class="popup-ip">' + m.ip + '</span><br>' +
         '<span class="popup-label">Location:</span> ' + (m.city ? m.city + ', ' : '') + m.country + '<br>' +
         '<span class="popup-label">ISP:</span> ' + m.isp + '<br>' +
-        '<span class="popup-label">Attempts:</span> <strong>' + weekCount + '</strong>' +
+        '<span class="popup-label">Attempts:</span> <strong>' + dayCount + '</strong>' +
         credsHtml
       );
 
@@ -2542,15 +2531,12 @@ def generate_html(data):
 
   var timelineChart = null;
 
-  function updateTimeline(range) {{
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
+  function updateTimeline(dayKey) {{
     var filteredLabels = [];
     var filteredData = [];
     for (var i = 0; i < allTimelineLabels.length; i++) {{
       // Timeline labels are like "2026-02-07 14:00 EST"
-      var dayPart = allTimelineLabels[i].substring(0, 10);
-      if (dayPart >= startStr && dayPart <= endStr) {{
+      if (allTimelineLabels[i].substring(0, 10) === dayKey) {{
         filteredLabels.push(allTimelineLabels[i]);
         filteredData.push(allTimelineData[i]);
       }}
@@ -2563,44 +2549,22 @@ def generate_html(data):
     }}
   }}
 
-  function updateDailyBreakdown(range) {{
-    var startStr = dateStr(range.start);
-    var endStr = dateStr(range.end);
-    var container = document.getElementById('dailyBreakdown');
-    var html = '<table><tr><th>Date</th><th>Sessions</th><th class="hide-mobile">Login Attempts</th><th>Successful</th><th>Unique IPs</th><th class="hide-mobile">Commands</th><th class="hide-mobile">Top Attacker</th></tr>';
-    allDailyBreakdown.forEach(function(d) {{
-      if (d.date >= startStr && d.date <= endStr) {{
-        var attackerCell = d.top_attacker_ip
-          ? '<span class="nick-link" onclick="flyToAttacker(&quot;' + d.top_attacker_nick + '&quot;)">' + d.top_attacker_nick + '</span> <span style="color:#555">(' + d.top_attacker_ip + ')</span>'
-          : '<span style="color:#555">\u2014</span>';
-        html += '<tr><td class="glow">' + d.date + '</td><td>' + d.sessions + '</td><td class="hide-mobile">' + d.login_attempts + '</td><td>' + d.successful + '</td><td>' + d.unique_ips + '</td><td class="hide-mobile">' + d.commands + '</td><td class="hide-mobile">' + attackerCell + '</td></tr>';
-      }}
-    }});
-    html += '</table>';
-    container.innerHTML = html;
-  }}
-
-  window.changeWeek = function(dir) {{
-    var minOff = getMinWeekOffset();
-    var newOffset = weekOffset + dir;
+  window.changeDay = function(dir) {{
+    var newOffset = dayOffset + dir;
     if (newOffset > 0) newOffset = 0;
-    if (newOffset < minOff) newOffset = minOff;
-    if (newOffset !== weekOffset) {{
-      weekOffset = newOffset;
-      localStorage.setItem('hpd_weekOffset', weekOffset);
-      updateWeekDisplay();
+    if (newOffset < minDayOffset) newOffset = minDayOffset;
+    if (newOffset !== dayOffset) {{
+      dayOffset = newOffset;
+      localStorage.setItem('hpd_dayOffset', dayOffset);
+      updateDayDisplay();
     }}
   }};
 
   // A restored offset may now be out of range (the data window can shrink) —
-  // clamp it to what's available before the first render.
-  (function() {{
-    var minOff = getMinWeekOffset();
-    if (weekOffset < minOff) weekOffset = minOff;
-    if (weekOffset > 0) weekOffset = 0;
-  }})();
-  // Render markers for current week (updateWeekDisplay handles filtering)
-  updateWeekDisplay();
+  // clamp it to what's available. The first render (updateDayDisplay) runs
+  // after the timeline chart is created below, so the chart is filtered from
+  // the start instead of showing the full 60-day dataset.
+  if (dayOffset < minDayOffset) dayOffset = minDayOffset;
 
   function animatePulse() {{
     var t = Date.now() / 1000;
@@ -2658,14 +2622,16 @@ def generate_html(data):
     }}
   }});
 
-  // Timeline chart
+  // Timeline chart. Starts empty — updateDayDisplay() below fills in the
+  // selected day (creating it with the full dataset briefly rendered all 60
+  // days of hourly points).
   timelineChart = new Chart(document.getElementById('timelineChart'), {{
     type: 'line',
     data: {{
-      labels: {timeline_labels},
+      labels: [],
       datasets: [{{
         label: 'Attempts',
-        data: {timeline_data},
+        data: [],
         borderColor: '#00ff41',
         backgroundColor: 'rgba(0, 255, 65, 0.1)',
         fill: true,
@@ -2692,6 +2658,9 @@ def generate_html(data):
       }}
     }}
   }});
+
+  // First render: map markers, timeline, and pager label for the selected day.
+  updateDayDisplay();
 
 </script>
 
