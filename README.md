@@ -2,9 +2,11 @@
 
 A **Cowrie SSH honeypot** disguised as a Solana validator node, with a live web dashboard showing real-time attacker sessions, geolocation, and LLM-generated behavior descriptions.
 
-![Python 3](https://img.shields.io/badge/python-3.10+-blue)
+![Python 3](https://img.shields.io/badge/python-3.12+-blue)
 ![Cowrie](https://img.shields.io/badge/honeypot-cowrie-orange)
 ![Ollama](https://img.shields.io/badge/LLM-ollama-green)
+
+![Honeypot dashboard — live attack map, attacker leaderboard, and session replays](docs/screenshot.png)
 
 ## What It Does
 
@@ -91,11 +93,14 @@ This disguise is effective — many attackers specifically try Solana-related cr
 ```
 honeypot-dashboard/
 ├── README.md
+├── LICENSE
 ├── .gitignore
 ├── Dockerfile                  # Python 3.12 image for the dashboard
 ├── docker-compose.yml          # Containerized deployment (host networking)
 ├── Makefile                    # test / build / up / down / logs
 ├── requirements-test.txt       # pytest + syrupy + pytest-mock
+├── deploy/                     # iptables-redirect units + email watchdog
+├── docs/                       # screenshot
 ├── app/
 │   ├── generate.py             # Log parser + GeoIP + LLM + HTML renderer
 │   ├── serve.py                # HTTP server (localhost:9999, behind nginx)
@@ -160,7 +165,7 @@ git clone https://github.com/brezgis/honeypot-dashboard.git /home/dashboard
 
 # Install Ollama (optional, for LLM descriptions)
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:4b  # or any small model
+ollama pull qwen3.5:9b  # the default model in generate.py — or edit llm_generate() to use another
 
 # The dashboard reads logs from Cowrie's default location:
 #   /home/cowrie/cowrie/var/log/cowrie/cowrie.json
@@ -284,8 +289,10 @@ All set in `docker-compose.yml`; the same variables work for a bare-metal run.
 | `SERVE_REGEN_ON_START` | `1` | Whether `serve.py` regenerates on startup (the scheduler sets `0`) |
 
 The container runs as **non-root** (uid 10001) and joins the host's `cowrie`
-group for log reads. Because of that, the bind-mounted `./data` must be writable
-by that uid — one-time on the host:
+group for log reads — check `getent group cowrie` and adjust the `group_add`
+gid in `docker-compose.yml` if yours isn't `988`. Because the container is
+non-root, the bind-mounted `./data` must be writable by that uid — one-time on
+the host:
 
 ```bash
 sudo chown -R 10001:10001 data
@@ -315,6 +322,7 @@ sudo chown -R 10001:10001 data
   RESEND_API_KEY=re_...
   ALERT_FROM="Honeypot Watchdog <honeypot@mail.example.com>"
   ALERT_TO=you@example.com
+  DASHBOARD_URL=https://your-domain.example.com/
   EOF
   sudo chmod 600 /etc/honeypot-watchdog.env
   /usr/local/bin/honeypot-watchdog.sh --test     # confirm email delivery
@@ -370,4 +378,4 @@ Anna Brezgis and Claude — [brezgis.com](https://brezgis.com)
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

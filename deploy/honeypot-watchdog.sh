@@ -7,6 +7,7 @@
 #   RESEND_API_KEY=re_...
 #   ALERT_FROM=Honeypot Watchdog <honeypot@mail.example.com>
 #   ALERT_TO=you@example.com
+#   DASHBOARD_URL=https://your-domain.example.com/   # optional, linked in alerts
 #
 # Behavior: alerts once on an OK->FAIL transition, reminds at most every
 # REMIND_EVERY seconds while still broken, and sends one note on FAIL->OK.
@@ -22,8 +23,9 @@ REDIRECT_PORT="${REDIRECT_PORT:-2223}"
 DASHBOARD_MAX_AGE="${DASHBOARD_MAX_AGE:-1800}"   # dashboard.html must be < 30 min old
 REMIND_EVERY="${REMIND_EVERY:-43200}"            # re-alert at most every 12h while broken
 STALL_LIMIT="${STALL_LIMIT:-3}"                  # consecutive low-growth checks before alarm
-FROM="${ALERT_FROM:-Honeypot Watchdog <honeypot@mail.brezgis.com>}"
+FROM="${ALERT_FROM:-Honeypot Watchdog <honeypot@mail.example.com>}"
 TO="${ALERT_TO:-}"
+DASHBOARD_URL="${DASHBOARD_URL:-https://your-domain.example.com/}"
 
 send() {  # $1=subject  $2=text-body
   if [ -z "${RESEND_API_KEY:-}" ] || [ -z "$TO" ]; then
@@ -102,7 +104,7 @@ last_alert=$(cat "$ALERT_STAMP" 2>/dev/null || echo 0)
 if [ -n "$problems" ]; then
   echo FAIL > "$STATE_FILE"
   if [ "$prev_status" = OK ] || [ $(( now - last_alert )) -ge "$REMIND_EVERY" ]; then
-    body="$(printf 'The honeypot watchdog detected a problem on %s:\n%b\n\nChecked (UTC): %s\nDashboard: https://honeypot.brezgis.com/' "$(hostname)" "$problems" "$(date -u)")"
+    body="$(printf 'The honeypot watchdog detected a problem on %s:\n%b\n\nChecked (UTC): %s\nDashboard: %s' "$(hostname)" "$problems" "$(date -u)" "$DASHBOARD_URL")"
     send "🚨 Honeypot problem detected" "$body" && echo "$now" > "$ALERT_STAMP"
   fi
 else

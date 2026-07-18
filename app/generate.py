@@ -117,8 +117,7 @@ def validate_llm_output(text, max_chars=300):
 
 
 # === Prompt Routing System ===
-# Tested prompts from honeypot-prompt-routing.md
-# Pike <pike@brezgis.com> 2026-03-22
+# Prompt variants tested against real sessions, routed by attacker archetype.
 
 PROMPT_SOPHISTICATED = (
     "You are a security analyst writing one-liner descriptions for a honeypot dashboard.\n"
@@ -1277,7 +1276,6 @@ def compute_interestingness(ip, attempt_count, data):
 def generate_greatest_hits(data, desc_cache=None):
     """Generate attacker stories using prompt routing system.
     Each attacker is classified and gets a category-specific prompt.
-    Pike <pike@brezgis.com> 2026-03-22
     H1/H3 fix: accepts shared desc_cache from caller; if None, loads own copy."""
     hits = []
     geo_cache = data.get("geo_cache", {})
