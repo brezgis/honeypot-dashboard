@@ -2013,6 +2013,13 @@ def generate_html(data):
   #map .leaflet-tile-pane {{
     z-index: 1;
   }}
+  /* Basemap attribution (required by Esri's terms), restyled for the dark theme. */
+  .leaflet-control-attribution {{
+    background: rgba(10, 10, 10, 0.75) !important;
+    color: #6b7280 !important;
+    font-size: 10px;
+  }}
+  .leaflet-control-attribution a {{ color: #9ca3af !important; }}
 
   table {{
     width: 100%;
@@ -2384,14 +2391,19 @@ def generate_html(data):
     center: [20, 0],
     zoom: 2,
     zoomControl: true,
-    attributionControl: false,
+    attributionControl: true,
     maxBounds: [[-85, -180], [85, 180]],
     maxBoundsViscosity: 1.0,
     minZoom: 2
   }});
 
-  L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-    maxZoom: 18
+  // Esri "World Dark Gray Base" — free, no API key, attribution required.
+  // (CARTO's basemaps.cartocdn.com started serving "API KEY REQUIRED" tiles.)
+  // Native tiles stop around z16; Leaflet upscales past that instead of 404ing.
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
+    maxZoom: 18,
+    maxNativeZoom: 16,
+    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors'
   }}).addTo(map);
 
   setTimeout(function() {{ map.invalidateSize(true); }}, 100);
