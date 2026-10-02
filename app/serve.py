@@ -4,6 +4,8 @@ Simple HTTP server for the Honeypot Dashboard.
 Serves on localhost:9999, regenerates dashboard in the background.
 """
 
+import gzip
+import hashlib
 import http.server
 import os
 import subprocess
@@ -18,6 +20,8 @@ PORT = int(os.environ.get("SERVE_PORT", "9999"))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("HONEYPOT_DATA_DIR", SCRIPT_DIR)
 DASHBOARD_PATH = os.path.join(DATA_DIR, "dashboard.html")
+# Bulk page data written by generate.py beside dashboard.html and fetched by it.
+DATA_PATH = os.path.join(DATA_DIR, "dashboard-data.json")
 GENERATE_SCRIPT = os.path.join(SCRIPT_DIR, "generate.py")
 
 # Minimum seconds between regenerations (avoid hammering GeoIP API)
@@ -65,33 +69,107 @@ def regenerate():
     t.start()
 
 
+# path -> ((st_dev, st_ino, st_mtime_ns, st_size), body, gzipped body, etag).
+# generate.py replaces files via rename, so a changed stat key means new content;
+# each regeneration is read, transformed and compressed once, not per request.
+_file_cache = {}
+
+
+def _load_cached(path, transform=None):
+    """Return (body, gzipped_body, etag) for path, reusing work while unchanged.
+    Raises FileNotFoundError if the file doesn't exist."""
+    with open(path, "rb") as f:
+        st = os.fstat(f.fileno())
+        key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        cached = _file_cache.get(path)
+        if cached and cached[0] == key:
+            return cached[1:]
+        body = f.read()
+    if transform:
+        body = transform(body)
+    entry = (key, body, gzip.compress(body, 6),
+             '"%s"' % hashlib.sha1(body).hexdigest()[:20])
+    _file_cache[path] = entry
+    return entry[1:]
+
+
+def _add_refresh(body):
+    """Add the 30s auto-refresh meta tag if not present."""
+    content = body.decode()
+    if '<meta http-equiv="refresh"' not in content:
+        content = content.replace(
+            "<head>",
+            '<head>\n<meta http-equiv="refresh" content="30">',
+            1
+        )
+    return content.encode()
+
+
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=SCRIPT_DIR, **kwargs)
 
+    def _accepts_gzip(self):
+        enc = self.headers.get("Accept-Encoding", "")
+        return any(p.split(";")[0].strip().lower() == "gzip" for p in enc.split(","))
+
+    def _etag_matches(self, etag):
+        # Weak comparison: a proxy that compresses (nginx gzip) weakens our
+        # strong ETag to W/"..." before the browser echoes it back.
+        inm = self.headers.get("If-None-Match", "")
+        tags = [t.strip() for t in inm.split(",") if t.strip()]
+        return "*" in tags or any((t[2:] if t.startswith("W/") else t) == etag for t in tags)
+
+    def _send_body(self, body, gz, content_type, cache_control, etag=None):
+        """Send a 200 (gzip-encoded when the client accepts it), or a 304 when
+        an ETag is given and the client already has it."""
+        if etag and self._etag_matches(etag):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            return
+        use_gzip = self._accepts_gzip()
+        payload = gz if use_gzip else body
+        self.send_response(200)
+        self.send_header("Content-type", content_type)
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", cache_control)
+        if etag:
+            self.send_header("ETag", etag)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
-        if self.path in ("/", "/dashboard.html", "/index.html"):
+        path = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path == "/dashboard-data.json":
+            try:
+                body, gz, etag = _load_cached(DATA_PATH)
+            except FileNotFoundError:
+                self.send_error(404, "Not found")
+                return
+            # no-cache = always revalidate; the ETag turns the page's 30s
+            # auto-refresh into a 304 until the next regeneration.
+            self._send_body(body, gz, "application/json; charset=utf-8",
+                            "no-cache", etag=etag)
+            return
+        if path in ("/", "/dashboard.html", "/index.html"):
             # Regeneration handled by cron every 5 minutes
             # regenerate()  # removed — avoid duplicate regeneration
             self.path = "/dashboard.html"
             # Serve whatever HTML we have (even if stale)
             try:
-                with open(DASHBOARD_PATH, "r") as f:
-                    content = f.read()
-                # Add auto-refresh if not present
-                if '<meta http-equiv="refresh"' not in content:
-                    content = content.replace(
-                        "<head>",
-                        '<head>\n<meta http-equiv="refresh" content="30">',
-                        1
-                    )
-                encoded = content.encode()
-                self.send_response(200)
-                self.send_header("Content-type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-                self.end_headers()
-                self.wfile.write(encoded)
+                body, gz, _etag = _load_cached(DASHBOARD_PATH, transform=_add_refresh)
+                self._send_body(body, gz, "text/html; charset=utf-8",
+                                "no-cache, no-store, must-revalidate")
                 return
             except FileNotFoundError:
                 self.send_response(200)
@@ -99,7 +177,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 msg = b"<html><body style='background:#0a0a0a;color:#00ff41;font-family:monospace;padding:40px;text-align:center'><h1>Dashboard generating...</h1><p>First run with LLM takes a couple minutes. Refresh shortly.</p><meta http-equiv='refresh' content='15'></body></html>"
                 self.send_header("Content-Length", str(len(msg)))
                 self.end_headers()
-                self.wfile.write(msg)
+                if self.command != "HEAD":
+                    self.wfile.write(msg)
                 return
         self.send_error(404, "Not found")
         return

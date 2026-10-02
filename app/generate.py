@@ -360,6 +360,23 @@ CACHE_FILE = os.path.join(DATA_DIR, "description_cache.json")
 # window so recent days (newer, lower-volume IPs) aren't dropped off the map.
 MAX_MAP_MARKERS = int(os.environ.get("MAX_MAP_MARKERS", "10000"))
 
+# The bulk page data (map markers, hourly timeline, the bulk of the "Successful
+# Logins" terminal) is written to a separate JSON file beside dashboard.html and
+# fetched by the page, instead of being inlined. serve.py serves it (gzipped,
+# with an ETag), so the 30s auto-refresh mostly revalidates it with a 304.
+DATA_FILENAME = "dashboard-data.json"
+DATA_OUTPUT_PATH = os.path.join(DATA_DIR, DATA_FILENAME)
+
+# Attacker groups in the "Successful Logins" terminal rendered into the HTML up
+# front; the panel is a 400px scroll box, so this comfortably over-fills it. The
+# remaining groups ship (pre-rendered) in the data file and are appended as the
+# panel is scrolled toward the bottom.
+TERMINAL_INITIAL_GROUPS = int(os.environ.get("TERMINAL_INITIAL_GROUPS", "30"))
+
+# Map marker coordinates are rounded to this many decimals in the data file
+# (5 decimals ~ 1 m; markers are drawn with a >= 6px radius).
+MARKER_COORD_DECIMALS = 5
+
 
 def atomic_json_write(filepath, data, indent=2):
     """Write JSON atomically using temp file + os.rename (H3 fix)."""
@@ -1651,7 +1668,66 @@ def generate_attacker_narratives(data, desc_cache=None):
 
 
 
+def compact_markers(markers):
+    """Columnar, string-deduplicated encoding of the map markers for the data file.
+
+    Keeps exactly what the page's map code reads (ip, nickname, lat/lon, city,
+    country, isp, creds, daily_counts), in the original order. Markers with no
+    per-day activity are dropped: the map only ever draws a marker on a day it
+    has attempts, so those could never appear. The page's decodeMarkers()
+    rebuilds the original object shape.
+    """
+    strings, string_idx = [], {}
+
+    def sidx(value):
+        if value not in string_idx:
+            string_idx[value] = len(strings)
+            strings.append(value)
+        return string_idx[value]
+
+    drawable = [m for m in markers if m.get("daily_counts")]
+    days = sorted({d for m in drawable for d in m["daily_counts"]})
+    day_idx = {d: i for i, d in enumerate(days)}
+    cols = {k: [] for k in ("ip", "nick", "lat", "lon", "city", "country", "isp", "creds", "daily")}
+    for m in drawable:
+        cols["ip"].append(m["ip"])
+        cols["nick"].append(m.get("nickname", ""))
+        cols["lat"].append(round(m["lat"], MARKER_COORD_DECIMALS))
+        cols["lon"].append(round(m["lon"], MARKER_COORD_DECIMALS))
+        cols["city"].append(sidx(m.get("city", "")))
+        cols["country"].append(sidx(m.get("country")))
+        cols["isp"].append(sidx(m.get("isp")))
+        cols["creds"].append([sidx(c) for c in m.get("creds", [])])
+        flat = []
+        for day, count in m["daily_counts"].items():
+            flat += [day_idx[day], count]
+        cols["daily"].append(flat)
+    return {"days": days, "strings": strings, **cols}
+
+
+def build_page_data(data, terminal_rest=()):
+    """The bulk data the page fetches from DATA_FILENAME (see the page script)."""
+    markers = compact_markers(data["markers"])
+    # Earliest day with data bounds the day pager (previously computed in the
+    # browser from every marker's daily_counts + the daily breakdown).
+    candidates = list(markers["days"][:1]) + [d["date"] for d in data["daily_breakdown"] if d.get("date")]
+    return {
+        "markers": markers,
+        "minDay": min(candidates) if candidates else None,
+        "timelineLabels": data["timeline_labels"],
+        "timelineData": data["timeline_data"],
+        "terminal": list(terminal_rest),
+    }
+
+
 def generate_html(data):
+    """Render the dashboard page only (see render_dashboard for page + data file)."""
+    return render_dashboard(data)[0]
+
+
+def render_dashboard(data):
+    """Render the dashboard. Returns (html, data_json): the page and the contents
+    of DATA_FILENAME, which must be written beside it."""
     stats = data["stats"]
     today = data["today_stats"]
     last_24h = data.get("last_24h", {})
@@ -1663,12 +1739,8 @@ def generate_html(data):
     peak_success_rate = data.get("peak_success_rate", (0, "—"))
     geo_cache = data.get("geo_cache", {})
     ip_creds = data.get("ip_creds", {})
-    markers_json = json.dumps(data["markers"])
-    daily_breakdown_json = json.dumps(data["daily_breakdown"])
     top_creds_labels = json.dumps([c[0] for c in data["top_creds"][:15]])
     top_creds_data = json.dumps([c[1] for c in data["top_creds"][:15]])
-    timeline_labels = json.dumps(data["timeline_labels"])
-    timeline_data = json.dumps(data["timeline_data"])
     data_today_json = json.dumps(data.get("data_today", ""))
 
     # H1/H3 fix: load cache once, share between both LLM generation passes, save once at end
@@ -1743,8 +1815,14 @@ def generate_html(data):
         </div>"""
 
     terminal_content = ""
+    terminal_rest = []
     if attacker_narratives:
+        # One self-contained HTML chunk per attacker group. The first
+        # TERMINAL_INITIAL_GROUPS go into the page; the rest go into the data
+        # file and are appended on scroll (same markup, just later).
+        terminal_groups = []
         for atk in attacker_narratives:
+            terminal_content = ""
             session_word = "session" if atk["sessions"] == 1 else "sessions"
             cmd_word = "cmd" if atk["total_cmds"] == 1 else "cmds"
             terminal_content += f'<div class="term-ip-group">'
@@ -1781,6 +1859,10 @@ def generate_html(data):
                     terminal_content += f'<div class="cmd-line"><span class="cmd-prompt">$</span> {h(dc["cmd"])}{count_badge}</div>{note_html}'
                 terminal_content += '</div>'
             terminal_content += '</div></div>'
+            terminal_groups.append(terminal_content)
+        initial = max(0, TERMINAL_INITIAL_GROUPS)
+        terminal_content = "".join(terminal_groups[:initial])
+        terminal_rest = terminal_groups[initial:]
     elif data["successful_sessions"]:
         for s in data["successful_sessions"]:
             geo = geo_cache.get(s["ip"], {})
@@ -1807,6 +1889,14 @@ def generate_html(data):
             <td class="hide-mobile">{attacker_cell}</td>
         </tr>"""
 
+    # Compact JSON (no whitespace, raw UTF-8). The page requests it with a
+    # content-hash query so a regenerated file is never confused with a cached
+    # older one; serve.py ignores the query string.
+    data_json = json.dumps(build_page_data(data, terminal_rest),
+                           separators=(",", ":"), ensure_ascii=False)
+    data_version = hashlib.sha1(data_json.encode("utf-8")).hexdigest()[:12]
+    data_url_json = json.dumps(f"{DATA_FILENAME}?v={data_version}")
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1814,9 +1904,17 @@ def generate_html(data):
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Honeypot Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍯</text></svg>">
+<script>
+  // Start downloading the bulk data immediately, in parallel with the libraries.
+  window.hpdData = fetch({data_url_json}).then(function(r) {{
+    if (!r.ok) throw new Error('dashboard data: HTTP ' + r.status);
+    return r.json();
+  }});
+  window.hpdData.catch(function() {{}});  // reported where it is consumed
+</script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 
@@ -2373,7 +2471,7 @@ def generate_html(data):
   <div class="grid full">
     <div class="panel">
       <h2>\U0001f480 Successful Logins \u2014 What They Did</h2>
-      <div class="terminal" style="max-height:400px; overflow-y:auto;">
+      <div class="terminal" id="terminalLog" style="max-height:400px; overflow-y:auto;">
         {terminal_content}
       </div>
     </div>
@@ -2386,6 +2484,8 @@ def generate_html(data):
 </div>
 
 <script>
+// Runs once the deferred Leaflet/Chart.js scripts have executed.
+document.addEventListener('DOMContentLoaded', function() {{
   // Map
   var map = L.map('map', {{
     center: [20, 0],
@@ -2415,10 +2515,10 @@ def generate_html(data):
 
   var markerLookup = {{}};
   var pulseMarkers = [];
-  var allMarkers = {markers_json};
-  var allTimelineLabels = {timeline_labels};
-  var allTimelineData = {timeline_data};
-  var allDailyBreakdown = {daily_breakdown_json};
+  // Filled from the data file (window.hpdData) once it arrives.
+  var allMarkers = [];
+  var allTimelineLabels = [];
+  var allTimelineData = [];
 
   // Daily pagination state. Persisted across reloads so you aren't yanked
   // back to today while browsing older data. A week of markers was too dense
@@ -2448,23 +2548,32 @@ def generate_html(data):
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   }}
 
-  // Earliest day present in the data; the data is static per page load, so
-  // compute once. Offsets are day counts relative to dataToday (<= 0).
-  var minDayOffset = (function() {{
-    var minDay = null;
-    function consider(day) {{
-      if (day && (!minDay || day < minDay)) minDay = day;
-    }}
-    allMarkers.forEach(function(m) {{
-      Object.keys(m.daily_counts || {{}}).forEach(consider);
-    }});
-    allDailyBreakdown.forEach(function(d) {{ consider(d.date); }});
-    if (!minDay) return 0;
+  // Earliest day present in the data (offset in days relative to dataToday,
+  // <= 0). Set from the data file's minDay once it arrives.
+  var minDayOffset = 0;
+  function dayOffsetOf(day) {{
+    if (!day) return 0;
     // UTC arithmetic so DST transitions can't skew the day count
     var diffDays = Math.round(
-      (new Date(dataToday + 'T00:00:00Z') - new Date(minDay + 'T00:00:00Z')) / 86400000);
+      (new Date(dataToday + 'T00:00:00Z') - new Date(day + 'T00:00:00Z')) / 86400000);
     return -Math.max(0, diffDays);
-  }})();
+  }}
+
+  // Rebuild marker objects from the data file's columnar encoding.
+  function decodeMarkers(c) {{
+    var S = c.strings, out = new Array(c.ip.length);
+    for (var i = 0; i < c.ip.length; i++) {{
+      var daily = {{}}, flat = c.daily[i];
+      for (var j = 0; j < flat.length; j += 2) daily[c.days[flat[j]]] = flat[j + 1];
+      out[i] = {{
+        ip: c.ip[i], nickname: c.nick[i], lat: c.lat[i], lon: c.lon[i],
+        city: S[c.city[i]], country: S[c.country[i]], isp: S[c.isp[i]],
+        creds: c.creds[i].map(function(k) {{ return S[k]; }}),
+        daily_counts: daily
+      }};
+    }}
+    return out;
+  }}
 
   var mapMarkerLayers = [];
 
@@ -2570,11 +2679,8 @@ def generate_html(data):
     }}
   }};
 
-  // A restored offset may now be out of range (the data window can shrink) —
-  // clamp it to what's available. The first render (updateDayDisplay) runs
-  // after the timeline chart is created below, so the chart is filtered from
-  // the start instead of showing the full 60-day dataset.
-  if (dayOffset < minDayOffset) dayOffset = minDayOffset;
+  // The restored offset is clamped to the available range once the data file
+  // (which defines that range) has loaded — see the end of this script.
 
   function animatePulse() {{
     var t = Date.now() / 1000;
@@ -2669,14 +2775,46 @@ def generate_html(data):
     }}
   }});
 
-  // First render: map markers, timeline, and pager label for the selected day.
+  // First render: pager labels now; map markers + timeline once the data
+  // file arrives. The timeline chart above starts empty, so it is filtered to
+  // the selected day from the start.
   updateDayDisplay();
 
+  // "Successful Logins" terminal: only the first groups are in the page; the
+  // rest come from the data file and are appended as the panel nears its end.
+  var terminalRest = [];
+  var terminalEl = document.getElementById('terminalLog');
+  function appendTerminal() {{
+    if (!terminalRest.length) return;
+    if (terminalEl.scrollTop + terminalEl.clientHeight < terminalEl.scrollHeight - 800) return;
+    // After the last group (not 'beforeend'), so the panel's DOM ends up
+    // exactly as if every group had been in the page.
+    var last = terminalEl.lastElementChild, more = terminalRest.splice(0, 40).join('');
+    if (last) last.insertAdjacentHTML('afterend', more);
+    else terminalEl.insertAdjacentHTML('beforeend', more);
+  }}
+  terminalEl.addEventListener('scroll', appendTerminal, {{ passive: true }});
+
+  window.hpdData.then(function(d) {{
+    allMarkers = decodeMarkers(d.markers);
+    allTimelineLabels = d.timelineLabels;
+    allTimelineData = d.timelineData;
+    minDayOffset = dayOffsetOf(d.minDay);
+    // A restored offset may now be out of range (the data window can shrink) —
+    // clamp it to what's available.
+    if (dayOffset < minDayOffset) dayOffset = minDayOffset;
+    updateDayDisplay();
+    terminalRest = d.terminal || [];
+    appendTerminal();
+  }}).catch(function(err) {{
+    console.error('Failed to load dashboard data:', err);
+  }});
+}});
 </script>
 
 </body>
 </html>"""
-    return html
+    return html, data_json
 
 
 def main():
@@ -2743,12 +2881,15 @@ def main():
 
     data = analyze_events(events, geo_cache)
 
-    html = generate_html(data)
-    tmp_path = OUTPUT_PATH + ".tmp"
-    with open(tmp_path, "w") as f:
-        f.write(html)
-    os.rename(tmp_path, OUTPUT_PATH)
-    print(f"[\u2713] Dashboard written to {OUTPUT_PATH}")
+    html, data_json = render_dashboard(data)
+    # Data file first, then the page that references it, each atomically, so a
+    # freshly served page never points at a data file older than itself.
+    for path, content in ((DATA_OUTPUT_PATH, data_json), (OUTPUT_PATH, html)):
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.rename(tmp_path, path)
+    print(f"[\u2713] Dashboard written to {OUTPUT_PATH} (+ {DATA_FILENAME})")
     print(f"    Sessions: {data['stats']['total_sessions']} | Logins: {data['stats']['total_login_attempts']} | "
           f"Success: {data['stats']['successful_logins']} | IPs: {data['stats']['unique_ips']}")
 

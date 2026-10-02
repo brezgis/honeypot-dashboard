@@ -75,7 +75,9 @@ class TestXSSInNarratives:
 
 
 def _generate_html_from_lines(lines, geo_cache):
-    """Helper: parse log lines → analyze → generate HTML."""
+    """Helper: parse log lines → analyze → render. Returns the page HTML plus the
+    data file the page fetches (whose strings also end up in the DOM), so every
+    assertion covers both."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         f.write('\n'.join(lines))
         f.flush()
@@ -86,7 +88,21 @@ def _generate_html_from_lines(lines, geo_cache):
         generate._nickname_counter.clear()
         events = generate.parse_log(tmp_path)
         data = generate.analyze_events(events, geo_cache)
-        html = generate.generate_html(data)
-        return html
+        html, data_json = generate.render_dashboard(data)
+        # Decoded string values, not the JSON text: JSON escaping (\") would
+        # otherwise hide a raw payload from the substring assertions.
+        return html + "\n" + "\n".join(_json_strings(json.loads(data_json)))
     finally:
         os.unlink(tmp_path)
+
+
+def _json_strings(value):
+    """All string leaves of a decoded JSON value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _json_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _json_strings(v)

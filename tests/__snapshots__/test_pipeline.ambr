@@ -4,7 +4,7 @@
     'contains_attacker_ip': True,
     'has_body': True,
     'has_doctype': True,
-    'html_length_approx': 31,
+    'html_length_approx': 32,
     'total_sessions_shown': True,
   })
 # ---
