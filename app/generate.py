@@ -323,23 +323,13 @@ def build_profile_text(ip, attempt_count, ip_sessions, all_cmds, creds):
         cmd_samples = [cmd[:120] for cmd in unique[:8]]
         profile += "Commands: " + " | ".join(cmd_samples) + ". "
 
-        cmd_str = " ".join(all_cmds).lower()
-        if "authorized_keys" in cmd_str or "ssh-keygen" in cmd_str:
-            profile += "SSH key injection detected. "
-        if "chattr" in cmd_str:
-            profile += "Used chattr for file locking. "
-        if "mdrfckr" in cmd_str:
-            profile += "Injected mdrfckr SSH key. "
-        if re.search(r'passwd\b', cmd_str):
-            profile += "Changed root password. "
-        if "wget" in cmd_str or "curl" in cmd_str:
-            profile += "Downloaded remote payload. "
-        if re.search(r'chmod\s+(777|\+x)', cmd_str):
-            profile += "Made files executable. "
-        if "hosts.deny" in cmd_str:
-            profile += "Cleared hosts.deny. "
-        if any(x in cmd_str for x in ["xmrig", "minerd", "cpuminer"]):
-            profile += "Deployed cryptominer. "
+        # Verified behaviour from explain.py. (This used to be keyword hints
+        # like "Deployed cryptominer" whenever "minerd" appeared anywhere, so
+        # scripts that merely searched for miners got stories about mining.)
+        verified = summarize_commands(unique)
+        if verified:
+            profile += ("Verified actions, in order: "
+                        + verified.replace("[", "Known campaign: ").replace("]", ".") + ". ")
     elif login_count > 0:
         profile += "Got in but ran no commands. "
 
@@ -874,12 +864,13 @@ def generate_nickname(ip, geo, creds_tried=None):
     return _claim_nickname(ip, adj, noun, hv, sig)
 
 
-def nickname_source_text(ip):
+def nickname_source_text(ip, maxlen=80):
     """Human-readable 'why this name' line, raw (escape before rendering)."""
     kind, raw = _nickname_source.get(ip, (None, None))
     if not kind:
         return ""
-    raw = raw if len(raw) <= 80 else raw[:77] + "..."
+    raw = " ".join(raw.split())
+    raw = raw if len(raw) <= maxlen else raw[:maxlen - 1].rstrip() + "\u2026"
     return f"{kind}: {raw}"
 
 
@@ -1585,11 +1576,40 @@ def pick_greatest_hits(data, n=6):
     return [as_attacker(ip) for ip in picked[:n]]
 
 
-def _verified_story(verified):
-    """Readable sentence from a summarize_commands() line."""
+# Things a story may only claim when the verified behaviour backs them up.
+_CLAIMS = [
+    (re.compile(r"\b(deploy|install|launch|ran|run|start|drop)\w*\s+(an?\s+|the\s+|its\s+)?(monero\s+|crypto\s*)?(miner|xmrig)", re.I),
+     lambda camps, labels: bool({"Monero miner", "Kinsing miner", "RedTail miner"} & camps)),
+    (re.compile(r"\b(inject|plant|add|install)\w*\s+(an?\s+|its\s+|their\s+)?(own\s+)?(ssh|mdrfckr)", re.I),
+     lambda camps, labels: "plants its own SSH key" in labels),
+    (re.compile(r"\b(reverse shell|backdoor account)", re.I),
+     lambda camps, labels: bool({"opens a reverse shell", "creates a backdoor account"} & labels)),
+    (re.compile(r"\b(stole|exfiltrat|harvest(ed)? credentials)", re.I),
+     lambda camps, labels: False),   # a honeypot has nothing real to steal
+]
+
+
+def check_claims(story, cmds):
+    """(ok, reason): reject stories claiming actions the commands don't show."""
+    campaigns, labels = _behaviour(cmds)
+    camps, labs = set(campaigns), set(labels)
+    for rx, allowed in _CLAIMS:
+        m = rx.search(story or "")
+        if m and not allowed(camps, labs):
+            return False, f"unsupported claim: {m.group(0)!r}"
+    return True, "ok"
+
+
+def _verified_story(verified, max_steps=4):
+    """Readable sentence from a summarize_commands() line (capped for a card)."""
     if not verified:
         return None
     text = re.sub(r"^\[([^\]]+)\]\s*", r"\1: ", verified)
+    text = re.sub(r"\s*\(\+\d+ more\)$", "", text)
+    head, _, chain = text.rpartition(": ") if text.startswith(tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")) and ": " in text else ("", "", text)
+    steps = chain.split(" \u2192 ")
+    chain = " \u2192 ".join(steps[:max_steps])
+    text = f"{head}: {chain}" if head else chain
     return text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")
 
 
@@ -1643,8 +1663,8 @@ def generate_greatest_hits(data, desc_cache=None):
 
         # Cache check — good descriptions are permanent
         cmd_hash = hashlib.md5(str(sorted(set(all_cmds))).encode()).hexdigest()[:8] if all_cmds else "nocmds"
-        # gh2_: stories from the grounded prompt (gh_ ones could invent actions)
-        cache_key = f"gh2_{ip}_{cmd_hash}"
+        # gh3_: stories from the grounded, claim-checked prompt (gh_/gh2_ could invent actions)
+        cache_key = f"gh3_{ip}_{cmd_hash}"
 
         cached_story = _cache_get(desc_cache, cache_key) if cache_key in desc_cache else None
         story = None
@@ -1667,10 +1687,9 @@ def generate_greatest_hits(data, desc_cache=None):
 
         if story is None:
             profile_text = build_profile_text(ip, count, ip_sessions, all_cmds, creds)
-            if verified:
-                profile_text += ("\nVerified actions, in order: " + verified.replace("[", "Known campaign: ").replace("]", ". ") + ".")
-            profile_text += ("\nOnly describe what is listed above. Passwords are guesses they TRIED, "
-                             "not things they stole or installed.")
+            profile_text += ("\nOnly describe actions in the verified list. Commands that search for "
+                             "something (miners, keys, wallets) did not install it. Passwords are guesses "
+                             "they TRIED, not things they stole or installed.")
             prompt_template = _CATEGORY_PROMPTS.get(category, PROMPT_BOMBER)
             prompt = prompt_template.replace("{profile}", profile_text)
 
@@ -1681,12 +1700,16 @@ def generate_greatest_hits(data, desc_cache=None):
 
             # Quality gate — _bad_starts now consolidated into _BAD_PREFIXES (M1 fix)
             is_valid, reason = validate_llm_output(story, max_chars=200)
+            if is_valid:
+                is_valid, reason = check_claims(story, unique_cmds)
             if not is_valid:
                 print(f"    First attempt failed ({reason}), retrying...")
                 raw = llm_generate(prompt, temperature=0.4, max_tokens=60)
                 story = strip_markdown(raw)
                 story = re.sub(r'^[\u2192\u279c>]+\s*', '', story).strip()
                 is_valid, reason = validate_llm_output(story, max_chars=200)
+                if is_valid:
+                    is_valid, reason = check_claims(story, unique_cmds)
 
             if not is_valid:
                 print(f"    LLM failed twice, using {category} fallback")
@@ -2087,7 +2110,6 @@ td { color: var(--text); }
 .hit-card { background: #111a11; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
 .hit-card .hit-nick { color: var(--red); font-weight: bold; font-size: 1.1em; cursor: pointer; }
 .hit-card .hit-nick:hover { text-shadow: 0 0 8px rgba(255,68,68,0.5); }
-.hit-card .hit-why { color: #555; font-size: 0.72em; word-break: break-all; }
 .hit-card .hit-stat { color: var(--green); font-family: 'Orbitron', sans-serif; font-size: 0.85em; margin: 4px 0; }
 .hit-card .hit-story { color: var(--text); font-size: 0.85em; margin-top: 6px; line-height: 1.4; }
 .hit-card .hit-time { color: #555; font-size: 0.75em; margin-top: 4px; }
@@ -2249,7 +2271,6 @@ def render_dashboard(data):
     greatest_hits = generate_greatest_hits(data, desc_cache=shared_desc_cache)
     greatest_hits_html = ""
     for hit in greatest_hits:
-        why = nickname_source_text(hit["ip"])
         parts = [f"{hit['count']:,} attempts"]
         if hit.get("sessions"):
             parts.append(f"{hit['sessions']} sessions")
@@ -2258,7 +2279,6 @@ def render_dashboard(data):
         greatest_hits_html += (
             f'<div class="hit-card">'
             f'<div class="hit-nick" data-ip="{h(hit["ip"])}">{hit["flag"]} {h(hit["nick"])}</div>'
-            + (f'<div class="hit-why">named for {h(why)}</div>' if why else "")
             + f'<div class="hit-stat">{" · ".join(parts)}</div>'
             f'<div class="hit-story">{h(hit["story"])}</div>'
             + (f'<div class="hit-time">⏰ {h(hit["time_range"])}</div>' if hit.get("time_range") else "")

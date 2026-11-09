@@ -131,7 +131,7 @@ class TestLLMPasses:
         cache = {}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits and hits[0]["story"]
-        assert not [k for k in cache if k.startswith("gh2_")]
+        assert not [k for k in cache if k.startswith("gh3_")]
 
     def test_cached_fallback_replaced_once_llm_is_up(self, tmp_path, mocker):
         good = "Logged in, ran uname to fingerprint the box, then left \u2014 window-shopping."
@@ -140,7 +140,7 @@ class TestLLMPasses:
         data = _data(tmp_path, LINES)
         cache = {}
         generate.generate_greatest_hits(data, desc_cache=cache)
-        (k,) = [k for k in cache if k.startswith("gh2_")]
+        (k,) = [k for k in cache if k.startswith("gh3_")]
         cache[k] = {"text": "Gained access and ran uname -a — hands-on-keyboard operator."}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits[0]["story"] == good
@@ -241,3 +241,25 @@ class TestFriendlyDates:
         assert generate.friendly_range(t(2026, 9, 27, 1, 0), t(2026, 11, 8, 3, 0), today) == "Sep 27 – today"
         assert generate.friendly_day("2026-11-08", today) == "Today"
         assert generate.friendly_day("2026-11-07", today) == "Sat, Nov 7"
+
+
+class TestClaimCheck:
+    SCANNER = ["grep -rEl 'wallet\\.dat|mnemonic|xmrig|minerd|authorized_keys' /root /home"]
+
+    def test_rejects_invented_mining_and_keys(self):
+        ok, why = generate.check_claims("Scanned for wallets before deploying a miner.", self.SCANNER)
+        assert not ok and "miner" in why
+        ok, _ = generate.check_claims("Scanned for secrets, then injecting a SSH key.", self.SCANNER)
+        assert not ok
+
+    def test_allows_supported_claims(self):
+        miner = ["./xmrig -o pool.supportxmr.com:443 -u 4AbC"]
+        assert generate.check_claims("Deployed a Monero miner and left.", miner)[0]
+        key = ['echo "ssh-rsa AAAA mdrfckr" >> .ssh/authorized_keys']
+        assert generate.check_claims("Planted its own SSH key, mdrfckr style.", key)[0]
+        assert generate.check_claims("Hunted rival miners and Telegram sessions.", self.SCANNER)[0]
+
+    def test_profile_has_no_keyword_guesses(self):
+        text = generate.build_profile_text("1.1.1.1", 5, [{}], self.SCANNER, [])
+        assert "Deployed cryptominer" not in text and "SSH key injection" not in text
+        assert "searches files for secrets" in text

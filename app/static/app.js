@@ -78,8 +78,20 @@
     map.createPane('rings');
     map.getPane('rings').style.zIndex = 390;
     map.getPane('rings').style.pointerEvents = 'none';
-    canvas = L.canvas({ padding: 0.3 });
-    svg = L.svg({ padding: 0.3, pane: 'rings' });
+    // padding 1 = one extra screen in every direction, and the dots are redrawn
+    // during a drag (Leaflet only redraws on release), so fast drags don't
+    // show clipped or missing dots. A few hundred dots redraw in well under 1ms.
+    canvas = L.canvas({ padding: 1 });
+    svg = L.svg({ padding: 1, pane: 'rings' });
+    var redrawQueued = false;
+    map.on('move', function () {
+      if (redrawQueued) return;
+      redrawQueued = true;
+      requestAnimationFrame(function () {
+        redrawQueued = false;
+        if (canvas._map) canvas._update();   // Leaflet's own reposition+redraw
+      });
+    });
     pulseLayer = L.layerGroup().addTo(map);
     dotLayer = L.layerGroup().addTo(map);
     selectLayer = L.layerGroup().addTo(map);
