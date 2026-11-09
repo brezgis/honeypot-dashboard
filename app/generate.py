@@ -29,6 +29,8 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+
+import explain
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from html import escape as h
@@ -431,109 +433,28 @@ def atomic_json_write(filepath, data, indent=2):
 
 
 def annotate_command(cmd):
-    """Layer 1: Dictionary lookup for command annotations. Returns short technical note or None."""
-    cmd_stripped = cmd.strip()
-    cmd_lower = cmd_stripped.lower()
-    
-    # Exact/prefix matches first
-    annotations = {
-        "uname -a": "OS/kernel identification",
-        "uname": "OS identification",
-        "cat /etc/passwd": "user enumeration",
-        "cat /etc/shadow": "password hash extraction",
-        "cat /proc/cpuinfo": "CPU profiling",
-        "cat /proc/meminfo": "memory profiling",
-        "cat /proc/version": "kernel version check",
-        "free -m": "RAM check",
-        "free -h": "RAM check",
-        "free": "RAM check",
-        "df -h": "disk space check",
-        "df": "disk space check",
-        "lscpu": "CPU architecture scan",
-        "nproc": "core count check",
-        "dmidecode": "hardware inventory",
-        "lspci": "PCI device enumeration",
-        "lsblk": "block device enumeration",
-        "lsusb": "USB device scan",
-        "ifconfig": "network mapping",
-        "ip addr": "network mapping",
-        "ip a": "network mapping",
-        "ip route": "routing table check",
-        "hostname": "hostname discovery",
-        "hostname -I": "IP address discovery",
-        "whoami": "privilege check",
-        "id": "privilege check",
-        "w": "logged-in users check",
-        "who": "logged-in users check",
-        "last": "login history check",
-        "uptime": "uptime check",
-        "ps aux": "process enumeration",
-        "ps -ef": "process enumeration",
-        "top": "process monitoring",
-        "netstat -tulpn": "open ports scan",
-        "ss -tulpn": "open ports scan",
-        "mount": "mounted filesystem check",
-        "dmesg": "kernel message dump",
-        "env": "environment variable dump",
-        "printenv": "environment variable dump",
-        "history": "history snooping",
-        "cat ~/.bash_history": "history snooping",
-        "cat /root/.bash_history": "history snooping",
-    }
-    
-    if cmd_lower in annotations:
-        return annotations[cmd_lower]
-    
-    patterns = [
-        (r'export\s+HISTFILE\s*=\s*/dev/null', "anti-forensics: disable history"),
-        (r'unset\s+HISTFILE', "anti-forensics: disable history"),
-        (r'export\s+HISTSIZE\s*=\s*0', "anti-forensics: disable history"),
-        (r'HISTORY.*=/dev/null', "anti-forensics: disable history"),
-        (r'/bin/\./\w+', "obfuscated system check"),
-        (r'cat\s+/etc/passwd', "user enumeration"),
-        (r'cat\s+/etc/shadow', "password hash extraction"),
-        (r'cat\s+/proc/cpuinfo', "CPU profiling"),
-        (r'wget\s+https?://', "payload download from C2"),
-        (r'curl\s+https?://', "payload download"),
-        (r'curl\s+-[sOo]', "payload download"),
-        (r'tftp\s+', "payload download via TFTP"),
-        (r'chmod\s+\+x', "make executable"),
-        (r'chmod\s+[0-7]*7[0-7]*\s+', "make executable (world)"),
-        (r'^\.\/', "execute payload"),
-        (r'/tmp/\w+', "execute from /tmp"),
-        (r'crontab', "persistence setup"),
-        (r'/etc/cron', "persistence setup"),
-        (r'iptables', "firewall tampering"),
-        (r'ufw\s+', "firewall tampering"),
-        (r'systemctl', "service manipulation"),
-        (r'service\s+', "service manipulation"),
-        (r'rm\s+-rf\s+/', "destructive wipe attempt"),
-        (r'rm\s+.*\.log', "log cleanup"),
-        (r'pkill|killall|kill\s+-9', "process termination"),
-        (r'useradd|adduser', "create backdoor account"),
-        (r'passwd\s+', "password change attempt"),
-        (r'ssh-keygen|authorized_keys', "SSH key persistence"),
-        (r'nc\s+-[le]|ncat|netcat', "reverse shell / listener"),
-        (r'/dev/tcp/', "bash reverse shell"),
-        (r'base64\s+-d|base64\s+--decode', "decode obfuscated payload"),
-        (r'python.*-c.*import', "Python one-liner execution"),
-        (r'perl\s+-e', "Perl one-liner execution"),
-        (r'xmrig|minerd|ccminer|cpuminer', "cryptominer deployment"),
-        (r'\.bash_history', "history snooping"),
-        (r'history', "history snooping"),
-        (r'dd\s+if=', "disk operation"),
-        (r'echo\s+.*>\s*/etc/', "system file modification"),
-        (r'echo\s+.*>>\s*/etc/', "system file append"),
-        (r'apt\s+install|yum\s+install|pip\s+install', "package installation"),
-        (r'docker\s+', "container manipulation"),
-        (r'chattr\s+', "file attribute tampering"),
-    ]
-    
-    for pattern, note in patterns:
-        if re.search(pattern, cmd_lower):
-            return note
-    
-    return None
+    """Plain-English note for one command, or None (see explain.py)."""
+    return explain.explain(cmd)
+
+
+def summarize_commands(cmds):
+    """One line for everything an attacker ran: the campaigns they belong to,
+    then their distinct behaviours in order (capped)."""
+    campaigns, labels = [], []
+    for c in cmds:
+        name = explain.campaign(c)
+        if name and name not in campaigns:
+            campaigns.append(name)
+        for label in explain.steps(c):
+            if label not in labels:
+                labels.append(label)
+    line = " → ".join(labels[:6])
+    if len(labels) > 6:
+        line += f" (+{len(labels) - 6} more)"
+    if campaigns:
+        line = f"[{', '.join(campaigns)}] {line}".strip()
+    return line or None
+
 
 # The only event types the dashboard reads. Cowrie logs ~6 events per session
 # (version, kex, closed, ...); skipping the rest before json.loads roughly
@@ -761,8 +682,10 @@ def _ip_hash(ip):
 # <adjective>_<noun>. (The old scheme appended _root/_sol to ~95% of names.)
 
 # Substrings that identify a known toolkit/botnet; checked against commands.
+# (Miner names aren't here: recon scripts grep for them, so a bare "xmrig"
+# doesn't mean a miner. Verified campaigns come from explain.campaign().)
 IOC_KEYWORDS = [
-    "mdrfckr", "xmrig", "kinsing", "kdevtmpfsi", "c3pool", "supportxmr", "nanopool",
+    "mdrfckr", "kinsing", "kdevtmpfsi",
     "redtail", "mirai", "gafgyt", "tsunami", "dota", "perlbot", "kaiten", "muhstik",
     "sysrv", "outlaw", "teamtnt", "watchdogs", "rondodox",
 ]
@@ -821,8 +744,20 @@ def _slug(value, maxlen=12):
     return s
 
 
+# explain.py campaign -> nickname signature
+CAMPAIGN_SIGNATURES = {
+    "mdrfckr SSH-key botnet": "mdrfckr", "Monero miner": "xmrig", "Kinsing miner": "kinsing",
+    "RedTail miner": "redtail", "Mirai-family IoT botnet": "mirai",
+    "Telegram session stealer": "tgthief", "honeypot hunter": "potsniffer",
+}
+
+
 def _command_signature(cmds):
     """(slug, source command) for the most distinctive thing in a command list."""
+    for raw in cmds:
+        sig = CAMPAIGN_SIGNATURES.get(explain.campaign(raw))
+        if sig:
+            return sig, raw
     lowered = [c.lower() for c in cmds]
     for kw in IOC_KEYWORDS:
         for raw, low in zip(cmds, lowered):
@@ -1425,6 +1360,7 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
         "successful_sessions": success_data,
         "geo_cache": geo_cache,
         "ip_creds": ip_creds,
+        "ip_attempts": dict(ip_attempts),
         "ip_first_seen": ip_first_seen,
         "ip_last_seen": ip_last_seen,
         "unique_countries": len(unique_countries),
@@ -1554,6 +1490,109 @@ def compute_interestingness(ip, attempt_count, data):
     return score
 
 
+def _ip_index(data):
+    """ip -> sessions / commands run after login, built once per data dict."""
+    idx = data.get("_ip_index")
+    if idx is None:
+        sessions, cmds = defaultdict(list), defaultdict(list)
+        for sess in data.get("successful_sessions", []):
+            sessions[sess["ip"]].append(sess)
+            cmds[sess["ip"]].extend(c["cmd"] for c in sess["commands"])
+        idx = data["_ip_index"] = {"sessions": sessions, "cmds": cmds}
+    return idx
+
+
+# Behaviours worth more than routine recon when ranking Greatest Hits.
+_HIGH_SIGNAL = {
+    "plants its own SSH key": 12, "downloads a payload": 12, "opens a reverse shell": 15,
+    "downloads over a raw socket (no curl/wget needed)": 12,
+    "searches files for secrets (seed phrases, API keys)": 14, "looks for crypto wallets": 10,
+    "hunts for Telegram session files": 14, "looks for SMS modems": 12,
+    "asks the cloud metadata service for credentials": 14, "looks for cloud credentials": 10,
+    "adds a cron job (persistence)": 10, "installs a service (persistence)": 10,
+    "creates a backdoor account": 12, "changes the root password": 8,
+    "kills competing processes": 8, "looks for honeypot software (Cowrie)": 14,
+    "tries MikroTik router commands": 10, "deletes logs": 8,
+}
+
+
+def _behaviour(cmds):
+    """(campaigns, labels) across a list of commands."""
+    campaigns, labels = [], []
+    for c in dict.fromkeys(cmds):
+        name = explain.campaign(c)
+        if name and name not in campaigns:
+            campaigns.append(name)
+        for label in explain.steps(c):
+            if label not in labels:
+                labels.append(label)
+    return campaigns, labels
+
+
+def pick_greatest_hits(data, n=6):
+    """The n most interesting attackers, all different from each other.
+
+    Candidates are everyone who got in plus the top attackers by volume (the
+    old pool was only the top 10 by volume, so six near-identical uname bots
+    always won). Ranked by what they did, then de-duplicated by behaviour so
+    two members of the same campaign can't both make the list. The last slot
+    goes to the biggest brute-forcer if they aren't already in."""
+    idx = _ip_index(data)
+    attempts = data.get("ip_attempts") or {a["ip"]: a["count"] for a in data["top_attackers"]}
+    geo_cache = data.get("geo_cache", {})
+    ip_creds = data.get("ip_creds", {})
+
+    def as_attacker(ip):
+        for a in data["top_attackers"]:
+            if a["ip"] == ip:
+                return a
+        geo = geo_cache.get(ip, {})
+        return {"ip": ip, "count": attempts.get(ip, 0), "country": geo.get("country", "Unknown"),
+                "city": geo.get("city", ""), "cc": geo.get("countryCode", ""),
+                "flag": flag_emoji(geo.get("countryCode", "")), "isp": geo.get("isp", "Unknown"),
+                "nickname": generate_nickname(ip, geo, ip_creds.get(ip, []))}
+
+    scored = []
+    for ip in dict.fromkeys([a["ip"] for a in data["top_attackers"]] + list(idx["cmds"])):
+        campaigns, labels = _behaviour(idx["cmds"].get(ip, []))
+        score = min(math.log2(attempts.get(ip, 0) + 2) * 1.5, 12)
+        score += min(len(labels) * 4, 40) + sum(_HIGH_SIGNAL.get(l, 0) for l in labels)
+        score += 8 * len([c for c in campaigns if c != "honeypot-detection probe"])
+        score += min(len(idx["sessions"].get(ip, [])), 5)
+        real_campaigns = frozenset(c for c in campaigns if c != "honeypot-detection probe")
+        scored.append((score, ip, (real_campaigns, tuple(sorted(labels)))))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+
+    # One card per campaign; without a campaign, one per exact behaviour set.
+    picked, seen_campaigns, seen_labels = [], set(), set()
+    for score, ip, (camps, labels) in scored:
+        if len(picked) >= n - 1:
+            break
+        if (camps & seen_campaigns) or (not camps and labels in seen_labels):
+            continue
+        seen_campaigns |= camps
+        seen_labels.add(labels)
+        picked.append(ip)
+    if data["top_attackers"]:
+        biggest = data["top_attackers"][0]["ip"]
+        if biggest not in picked:
+            picked.append(biggest)
+    for score, ip, signature in scored:  # top up if there weren't n distinct
+        if len(picked) >= n:
+            break
+        if ip not in picked:
+            picked.append(ip)
+    return [as_attacker(ip) for ip in picked[:n]]
+
+
+def _verified_story(verified):
+    """Readable sentence from a summarize_commands() line."""
+    if not verified:
+        return None
+    text = re.sub(r"^\[([^\]]+)\]\s*", r"\1: ", verified)
+    return text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")
+
+
 def generate_greatest_hits(data, desc_cache=None):
     """Generate attacker stories using prompt routing system.
     Each attacker is classified and gets a category-specific prompt.
@@ -1565,12 +1604,7 @@ def generate_greatest_hits(data, desc_cache=None):
     if _owns_cache:
         desc_cache = load_cache()
 
-    scored_attackers = []
-    for attacker in data["top_attackers"]:
-        score = compute_interestingness(attacker["ip"], attacker["count"], data)
-        scored_attackers.append((score, attacker))
-    scored_attackers.sort(key=lambda x: x[0], reverse=True)
-    ranked_attackers = [a for _, a in scored_attackers[:6]]
+    ranked_attackers = pick_greatest_hits(data)
 
     for attacker in ranked_attackers:
         nick = attacker["nickname"]
@@ -1578,13 +1612,12 @@ def generate_greatest_hits(data, desc_cache=None):
         count = attacker["count"]
         country = attacker.get("country", "Unknown")
 
-        ip_sessions = [s for s in data.get("successful_sessions", []) if s["ip"] == ip]
-        all_cmds = []
-        for s in ip_sessions:
-            all_cmds.extend([c["cmd"] for c in s["commands"]])
+        ip_sessions = _ip_index(data)["sessions"].get(ip, [])
+        all_cmds = _ip_index(data)["cmds"].get(ip, [])
 
         creds = ip_creds.get(ip, [])
-        unique_cmds = list(set(all_cmds))
+        unique_cmds = list(dict.fromkeys(all_cmds))
+        verified = summarize_commands(unique_cmds) if unique_cmds else None
 
         # Detect attack patterns
         cmd_str_lower = " ".join(all_cmds).lower() if all_cmds else ""
@@ -1610,7 +1643,8 @@ def generate_greatest_hits(data, desc_cache=None):
 
         # Cache check — good descriptions are permanent
         cmd_hash = hashlib.md5(str(sorted(set(all_cmds))).encode()).hexdigest()[:8] if all_cmds else "nocmds"
-        cache_key = f"gh_{ip}_{cmd_hash}"
+        # gh2_: stories from the grounded prompt (gh_ ones could invent actions)
+        cache_key = f"gh2_{ip}_{cmd_hash}"
 
         cached_story = _cache_get(desc_cache, cache_key) if cache_key in desc_cache else None
         story = None
@@ -1633,6 +1667,10 @@ def generate_greatest_hits(data, desc_cache=None):
 
         if story is None:
             profile_text = build_profile_text(ip, count, ip_sessions, all_cmds, creds)
+            if verified:
+                profile_text += ("\nVerified actions, in order: " + verified.replace("[", "Known campaign: ").replace("]", ". ") + ".")
+            profile_text += ("\nOnly describe what is listed above. Passwords are guesses they TRIED, "
+                             "not things they stole or installed.")
             prompt_template = _CATEGORY_PROMPTS.get(category, PROMPT_BOMBER)
             prompt = prompt_template.replace("{profile}", profile_text)
 
@@ -1667,7 +1705,8 @@ def generate_greatest_hits(data, desc_cache=None):
                     'top_cred': creds[0] if creds else 'default creds',
                     'got_in': len(ip_sessions) > 0,
                 }
-                story = _category_fallback(category, fallback_data)
+                # The verified summary beats a canned line: it's accurate.
+                story = _verified_story(verified) or _category_fallback(category, fallback_data)
 
             elif story:
                 # Only real LLM output is cached; fallbacks are recomputed each
@@ -1700,14 +1739,7 @@ def generate_greatest_hits(data, desc_cache=None):
                 l_utc = datetime.fromisoformat(last_seen.replace("Z", "+00:00")[:26]).replace(tzinfo=timezone.utc)
                 f_local = f_utc.astimezone(ZoneInfo("America/New_York"))
                 l_local = l_utc.astimezone(ZoneInfo("America/New_York"))
-                f_short = f_local.strftime("%H:%M")
-                l_short = l_local.strftime("%H:%M")
-                f_date = f_local.strftime("%Y-%m-%d")
-                l_date = l_local.strftime("%Y-%m-%d")
-                if f_date == l_date:
-                    time_range = f"{f_short}\u2013{l_short}"
-                else:
-                    time_range = f"{f_date[5:]} {f_short} \u2013 {l_date[5:]} {l_short}"
+                time_range = friendly_range(f_local, l_local)
             except (ValueError, TypeError):
                 time_range = ""
 
@@ -1717,7 +1749,7 @@ def generate_greatest_hits(data, desc_cache=None):
             "count": count,
             "flag": attacker.get("flag", "\U0001f3f4"),
             "story": story,
-            "cmds": len(all_cmds),
+            "cmds": len(unique_cmds),
             "sessions": len(ip_sessions),
             "time_range": time_range,
         })
@@ -1732,52 +1764,39 @@ def generate_greatest_hits(data, desc_cache=None):
 
 
 def generate_attacker_narratives(data, desc_cache=None):
-    """Generate ONE narrative per attacker IP, grouping all sessions and deduplicating commands.
-    H1/H3 fix: accepts shared desc_cache from caller; if None, loads own copy."""
+    """ONE entry per attacker IP that got in: all sessions grouped, commands
+    deduplicated, plus a one-line summary of what they did.
+
+    The summary comes from explain.py, not the LLM: it is accurate, instant,
+    and the LLM used to invent actions here. (desc_cache is accepted for
+    compatibility and unused.)"""
     geo_cache = data.get("geo_cache", {})
     ip_creds_map = data.get("ip_creds", {})
-    _owns_cache = desc_cache is None
-    if _owns_cache:
-        desc_cache = load_cache()
 
-    # Group successful sessions by IP
     ip_sessions = defaultdict(list)
     for s in data.get("successful_sessions", []):
         ip_sessions[s["ip"]].append(s)
 
-    if not ip_sessions:
-        return []
-
     results = []
-    llm_calls = 0
-    MAX_LLM_CALLS = 10
-
     for ip, sessions in ip_sessions.items():
         geo = geo_cache.get(ip, {})
         nick = generate_nickname(ip, geo, ip_creds_map.get(ip, []))
         country = geo.get("country", "Unknown")
         city = geo.get("city", "")
-        isp = geo.get("isp", "Unknown")
         loc = f"{city}, {country}" if city else country
 
-        # Collect ALL commands across all sessions, preserving order of first appearance
         all_cmds_ordered = []
         cmd_counts = Counter()
-        seen_cmds = set()
         all_creds = set()
-        first_ts = None
-        last_ts = None
-
+        first_ts = last_ts = None
         for s in sessions:
             if s.get("creds"):
                 all_creds.add(s["creds"])
             for c in s["commands"]:
                 cmd = c["cmd"]
-                cmd_counts[cmd] += 1
-                if cmd not in seen_cmds:
-                    seen_cmds.add(cmd)
+                if cmd not in cmd_counts:
                     all_cmds_ordered.append(cmd)
-                # Track time range
+                cmd_counts[cmd] += 1
                 ts = c.get("ts", "")
                 if ts:
                     if first_ts is None or ts < first_ts:
@@ -1785,162 +1804,31 @@ def generate_attacker_narratives(data, desc_cache=None):
                     if last_ts is None or ts > last_ts:
                         last_ts = ts
 
-        total_cmd_executions = sum(cmd_counts.values())
-        unique_cmd_count = len(all_cmds_ordered)
-        creds_str = ", ".join(sorted(all_creds)[:3]) or "unknown"
-
-        # Build cache key from IP + sorted unique commands
-        cmd_hash = hashlib.md5(str(sorted(seen_cmds)).encode()).hexdigest()[:8]
-        cache_key = f"atk_{ip}_{cmd_hash}"
-
-        cached = _cache_get(desc_cache, cache_key)
-        if cached:
-            is_valid, _reason = validate_llm_output(cached, max_chars=350)
-            if is_valid and '**' not in cached:
-                narrative = cached
-            else:
-                print(f"[*] Cached narrative for {cache_key} failed validation, regenerating")
-                narrative = None
-                if cache_key in desc_cache:
-                    del desc_cache[cache_key]
+        total = sum(cmd_counts.values())
+        if not all_cmds_ordered:
+            narrative = f"Logged in across {len(sessions)} session{'s' if len(sessions) != 1 else ''} but ran no commands."
         else:
-            narrative = None
-        if narrative is None:
-            cacheable = True  # False when the LLM was wanted but didn't deliver
-            # Build the narrative
-            # For simple cases (all same command), use a template
-            if unique_cmd_count == 0:
-                narrative = f"Logged in across {len(sessions)} sessions but ran no commands."
-            elif unique_cmd_count == 1 and any(
-                k in all_cmds_ordered[0].lower() for k in ["uname", "/bin/./uname"]
-            ):
-                narrative = f"Ran uname {total_cmd_executions}x across {len(sessions)} sessions — automated OS fingerprinting."
-            elif unique_cmd_count <= 3 and total_cmd_executions == unique_cmd_count:
-                # Few unique commands, each run once — use annotations
-                steps = []
-                for cmd in all_cmds_ordered:
-                    ann = annotate_command(cmd)
-                    if ann:
-                        steps.append(ann)
-                    else:
-                        # Use the command basename
-                        base = cmd.strip().split()[0].split("/")[-1] if cmd.strip() else "?"
-                        steps.append(base)
-                narrative = " → ".join(steps)
-            elif unique_cmd_count <= 6:
-                # Moderate complexity — build arrow chain from annotations
-                steps = []
-                for cmd in all_cmds_ordered:
-                    ann = annotate_command(cmd)
-                    if ann and ann not in steps:
-                        steps.append(ann)
-                    elif not ann:
-                        base = cmd.strip().split()[0].split("/")[-1] if cmd.strip() else "?"
-                        if base not in steps:
-                            steps.append(base)
-                # Add repetition note if significant
-                repeated = [(cmd, cnt) for cmd, cnt in cmd_counts.items() if cnt > 2]
-                narrative = " → ".join(steps)
-                if repeated:
-                    top_repeated = max(repeated, key=lambda x: x[1])
-                    # Guard against empty/whitespace command strings: "".split()
-                    # is [] and [0] would raise IndexError (production crash:
-                    # [FATAL] list index out of range). Fall back to "?".
-                    top_cmd = top_repeated[0].strip()
-                    ann = annotate_command(top_repeated[0]) or (
-                        top_cmd.split()[0].split("/")[-1] if top_cmd else "?"
-                    )
-                    narrative += f" (repeated {ann} {top_repeated[1]}x)"
-            else:
-                # Complex command set — use LLM
-                if llm_calls < MAX_LLM_CALLS:
-                    llm_calls += 1
-                    # Build deduplicated command summary for prompt
-                    cmd_summary_parts = []
-                    for cmd in all_cmds_ordered[:15]:
-                        count = cmd_counts[cmd]
-                        if count > 1:
-                            cmd_summary_parts.append(f"{cmd}  (x{count})")
-                        else:
-                            cmd_summary_parts.append(cmd)
-                    # Sanitize: truncate long commands and strip control characters
-                    cmd_summary_parts = [
-                        re.sub(r"[\x00-\x1f\x7f-\x9f]", "", part[:100])
-                        for part in cmd_summary_parts
-                    ]
-                    cmd_block = "\n".join(cmd_summary_parts)
-
-                    prompt = (
-                        "Summarize this SSH honeypot attacker's behavior as a short arrow-chain narrative. "
-                        "Use → to connect steps. Be specific and technical. No preamble, no quotes.\n\n"
-                        "Example: OS fingerprint via uname → full hardware audit (lscpu, dmidecode, free) → "
-                        "enumerated PCI devices → profiling for cryptomining potential\n\n"
-                        "Example: wget payload from C2 → chmod +x → executed binary → attempted persistence via crontab\n\n"
-                        f"Attacker: {nick} from {loc} ({isp})\n"
-                        f"Sessions: {len(sessions)}, Total commands: {total_cmd_executions}, "
-                        f"Unique commands: {unique_cmd_count}\n"
-                        f"Credentials: {creds_str}\n"
-                        f"Commands (deduplicated, in order):\n{cmd_block}\n\n"
-                        "Arrow-chain summary:"
-                    )
-                    narrative = llm_generate(prompt, temperature=0.5, max_tokens=80)
-                    narrative = strip_markdown(narrative)
-                    # Strip leading arrow from prompt format
-                    narrative = re.sub(r'^[\u2192\u2192]\s*', '', narrative).strip()
-
-                    # Validate — inline bad-starts consolidated into _BAD_PREFIXES (M1 fix)
-                    is_valid, reason = validate_llm_output(narrative)
-                    if not is_valid or len(narrative) < 10:
-                        narrative = None
-
-                if not narrative:
-                    # Fallback: build from annotations. Not cached, so the LLM
-                    # gets another go next run.
-                    cacheable = False
-                    steps = []
-                    for cmd in all_cmds_ordered[:10]:
-                        ann = annotate_command(cmd)
-                        if ann and ann not in steps:
-                            steps.append(ann)
-                    narrative = " → ".join(steps) if steps else f"Ran {unique_cmd_count} unique commands across {len(sessions)} sessions."
-
-            # Clean up
-            narrative = narrative.strip('"').strip()
-            if len(narrative) > 300:
-                narrative = narrative[:297].rsplit(" ", 1)[0] + "..."
-
-            if cacheable:
-                desc_cache[cache_key] = {
-                    "text": narrative,
-                    "_cached_at": datetime.now(timezone.utc).isoformat()
-                }
-
-        # Build the display commands: deduplicated with counts
-        display_cmds = []
-        for cmd in all_cmds_ordered:
-            count = cmd_counts[cmd]
-            display_cmds.append({"cmd": cmd, "count": count})
+            narrative = summarize_commands(all_cmds_ordered) or (
+                f"Ran {len(all_cmds_ordered)} command{'s' if len(all_cmds_ordered) != 1 else ''} "
+                "nothing here recognises.")
+            top_cmd, top_n = cmd_counts.most_common(1)[0]
+            if top_n >= 10 and len(sessions) > 1:
+                narrative += f" · same routine {top_n:,}× across {len(sessions):,} sessions"
 
         results.append({
             "ip": ip,
             "nick": nick,
             "loc": loc,
             "sessions": len(sessions),
-            "total_cmds": total_cmd_executions,
-            "unique_cmds": unique_cmd_count,
-            "creds": creds_str,
+            "total_cmds": total,
+            "unique_cmds": len(all_cmds_ordered),
+            "creds": ", ".join(sorted(all_creds)[:3]) or "unknown",
             "narrative": narrative,
-            "display_cmds": display_cmds,
+            "display_cmds": [{"cmd": c, "count": cmd_counts[c]} for c in all_cmds_ordered],
             "first_ts": first_ts,
             "last_ts": last_ts,
         })
-
-    if _owns_cache:
-        save_cache(desc_cache)
     return results
-
-
-
 
 
 def _epoch_minutes(ts):
@@ -2181,12 +2069,15 @@ td { color: var(--text); }
 .small { font-size: 0.8em; }
 
 .activity-feed { height: 350px; font-size: 0.82em; }
-.activity-row { padding: 6px 10px; border-bottom: 1px solid #111; display: flex; gap: 12px; align-items: baseline; }
+.activity-row { padding: 7px 10px; border-bottom: 1px solid #111; display: grid;
+  grid-template-columns: 6.5em minmax(0, 12em) minmax(0, 1fr); gap: 12px; align-items: baseline; }
 .activity-row:hover { background: #111a11; }
-.activity-row .ts { color: var(--faint); min-width: 150px; font-size: 0.9em; }
-.activity-row .ip { color: var(--red-soft); min-width: 130px; }
-.activity-row .action { color: var(--text); flex: 1; min-width: 0; max-height: 80px; overflow-y: auto;
-  overflow-x: hidden; word-break: break-all; white-space: pre-wrap; }
+.activity-row .ts { color: #555; font-size: 0.9em; font-variant-numeric: tabular-nums; }
+.activity-row .who { display: flex; flex-direction: column; min-width: 0; }
+.activity-row .who .nick-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-row .ip { color: #555; font-size: 0.85em; }
+.activity-row .action { color: var(--text); min-width: 0; max-height: 80px; overflow-y: auto;
+  overflow-x: hidden; overflow-wrap: anywhere; white-space: pre-wrap; }
 .count-badge { background: #ff6b35; color: #000; padding: 1px 6px; border-radius: 8px; font-size: 0.8em; font-weight: bold; }
 .success-text { color: var(--green) !important; font-weight: bold; }
 .nick-link { color: var(--red); font-weight: bold; cursor: pointer; }
@@ -2250,10 +2141,9 @@ td { color: var(--text); }
   .stat { min-width: unset; }
   .stat .value { font-size: 1.3em; }
   .stat .label { font-size: 0.55em; }
-  .activity-row { flex-wrap: wrap; gap: 2px; padding: 8px 6px; }
-  .activity-row .ts { min-width: unset; font-size: 0.7em; width: 100%; }
-  .activity-row .ip { min-width: unset; font-size: 0.8em; }
-  .activity-row .action { font-size: 0.75em; width: 100%; max-height: 60px; }
+  .activity-row { grid-template-columns: 4.5em minmax(0, 1fr); gap: 4px 8px; padding: 8px 6px; }
+  .activity-row .ts { font-size: 0.75em; }
+  .activity-row .action { grid-column: 1 / -1; font-size: 0.8em; max-height: 60px; }
   .hide-mobile { display: none !important; }
   table { font-size: 0.85em; }
   table td, table th { padding: 8px 6px; }
@@ -2284,6 +2174,57 @@ def _fmt_local(ts, fmt):
         return ""
 
 
+def _local_dt(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _today_key():
+    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+
+
+def _day_part(dt, today_key):
+    """'' for today, 'Nov 7' this year, 'Dec 30, 2025' otherwise."""
+    key = dt.strftime("%Y-%m-%d")
+    if key == today_key:
+        return ""
+    if key[:4] == today_key[:4]:
+        return dt.strftime("%b %-d")
+    return dt.strftime("%b %-d, %Y")
+
+
+def friendly_time(dt, today_key=None):
+    """'23:32' today, 'Nov 7, 23:32' on other days."""
+    day = _day_part(dt, today_key or _today_key())
+    return f"{day}, {dt:%H:%M}" if day else f"{dt:%H:%M}"
+
+
+def friendly_range(a, b, today_key=None):
+    """Compact span between two local datetimes: '23:10–23:32',
+    'Nov 7, 01:00–03:12', 'Sep 27 – Oct 4'."""
+    today_key = today_key or _today_key()
+    if a.date() == b.date():
+        if a.strftime("%H:%M") == b.strftime("%H:%M"):
+            return friendly_time(a, today_key)
+        day = _day_part(a, today_key)
+        span = f"{a:%H:%M}\u2013{b:%H:%M}"
+        return f"{day}, {span}" if day else span
+    return f"{_day_part(a, today_key) or 'today'} \u2013 {_day_part(b, today_key) or 'today'}"
+
+
+def friendly_day(key, today_key):
+    """'Today', 'Sat, Nov 7' (year only when it isn't this year)."""
+    try:
+        d = datetime.strptime(key, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return h(key or "")
+    if key == today_key:
+        return "Today"
+    return d.strftime("%a, %b %-d" if key[:4] == (today_key or "")[:4] else "%a, %b %-d, %Y")
+
+
 def render_dashboard(data):
     """Render the dashboard. Returns (html, data_json): the page and the contents
     of DATA_FILENAME, which must be written beside it."""
@@ -2298,6 +2239,7 @@ def render_dashboard(data):
     peak_success_rate = data.get("peak_success_rate", (0, "—"))
     geo_cache = data.get("geo_cache", {})
     ip_creds = data.get("ip_creds", {})
+    today_key = data.get("data_today", "")
 
     # H1/H3 fix: load cache once, share between both LLM generation passes, save once at end
     print("[*] Loading description cache...")
@@ -2312,7 +2254,7 @@ def render_dashboard(data):
         if hit.get("sessions"):
             parts.append(f"{hit['sessions']} sessions")
         if hit["cmds"]:
-            parts.append(f"{hit['cmds']} cmds")
+            parts.append(f"{hit['cmds']} distinct cmd{'' if hit['cmds'] == 1 else 's'}")
         greatest_hits_html += (
             f'<div class="hit-card">'
             f'<div class="hit-nick" data-ip="{h(hit["ip"])}">{hit["flag"]} {h(hit["nick"])}</div>'
@@ -2344,26 +2286,23 @@ def render_dashboard(data):
     activity_rows = ""
     prev_ip = None
     for ev in reversed(data["recent_events"]):
-        ts_short = _fmt_local(ev["ts"], "%Y-%m-%d %H:%M:%S") or (ev["ts"] or "?")[:19].replace("T", " ")
         count = ev.get("count", 1)
-        if count > 1:
-            first_ts, last_ts = ev.get("first_ts", ""), ev.get("last_ts", "")
-            if _fmt_local(first_ts, "%F") == _fmt_local(last_ts, "%F"):
-                rng = f"{_fmt_local(first_ts, '%H:%M')} – {_fmt_local(last_ts, '%H:%M')}"
-            else:
-                rng = f"{_fmt_local(first_ts, '%m-%d %H:%M')} – {_fmt_local(last_ts, '%m-%d %H:%M')}"
-            if rng.strip(" –"):
-                ts_short = rng
+        first_dt, last_dt = _local_dt(ev.get("first_ts") or ev["ts"]), _local_dt(ev.get("last_ts") or ev["ts"])
+        if count > 1 and first_dt and last_dt:
+            ts_short = friendly_range(first_dt, last_dt, today_key)
+        else:
+            ts_short = friendly_time(last_dt, today_key) if last_dt else h((ev["ts"] or "?")[:16])
+        full_ts = last_dt.strftime("%a %b %-d %Y, %H:%M:%S %Z") if last_dt else ""
         count_badge = f'<span class="count-badge">{count}×</span> ' if count > 1 else ""
         action_class = "success-text" if "SUCCESS" in ev["action"] else ""
         geo = geo_cache.get(ev['ip'], {})
         nick = generate_nickname(ev['ip'], geo, ip_creds.get(ev['ip'], []))
-        show_ip = h(ev["ip"]) if ev["ip"] != prev_ip else "↑"
+        ip_line = f'<span class="ip">{h(ev["ip"])}</span>' if ev["ip"] != prev_ip else ""
         prev_ip = ev["ip"]
         # Action already html-escaped at creation time — no double-escape
         activity_rows += (
-            f'<div class="activity-row"><span class="ts">{ts_short}</span>'
-            f'{_nick_html(ev["ip"], nick)}<span class="ip">{show_ip}</span>'
+            f'<div class="activity-row"><span class="ts" title="{full_ts}">{ts_short}</span>'
+            f'<span class="who">{_nick_html(ev["ip"], nick)}{ip_line}</span>'
             f'<span class="action {action_class}">{count_badge}{ev["action"]}</span></div>'
         )
     if not activity_rows:
@@ -2387,8 +2326,9 @@ def render_dashboard(data):
             )
             time_parts = []
             if atk.get("first_ts"):
-                time_parts.append(_fmt_local(atk["first_ts"], "%Y-%m-%d %H:%M %Z")
-                                  or h(atk["first_ts"][:16].replace("T", " ")))
+                f_dt, l_dt = _local_dt(atk["first_ts"]), _local_dt(atk.get("last_ts") or atk["first_ts"])
+                time_parts.append(friendly_range(f_dt, l_dt, today_key) if f_dt and l_dt
+                                  else h(atk["first_ts"][:16].replace("T", " ")))
             if atk.get("creds"):
                 time_parts.append(f'as {atk["creds"]}')  # already escaped
             meta = " · ".join(time_parts)
@@ -2401,8 +2341,11 @@ def render_dashboard(data):
                 hidden = len(atk["display_cmds"]) - len(shown)
                 for dc in shown:
                     count_badge = f' <span class="cmd-count">×{dc["count"]}</span>' if dc["count"] > 1 else ""
-                    annotation = annotate_command(dc["cmd"])
-                    note_html = f'<div class="cmd-annotation">↳ {annotation}</div>' if annotation else ""
+                    # The summary above already names campaigns and, for a
+                    # single command, says everything: don't repeat it.
+                    labels = explain.steps(dc["cmd"]) if len(atk["display_cmds"]) > 1 else []
+                    annotation = " → ".join(labels[:explain.MAX_STEPS])
+                    note_html = f'<div class="cmd-annotation">↳ {h(annotation)}</div>' if annotation else ""
                     cmd = dc["cmd"]
                     if len(cmd) > TERMINAL_MAX_CMD_CHARS:
                         cmd_html = (h(cmd[:TERMINAL_MAX_CMD_CHARS]) +
@@ -2427,7 +2370,7 @@ def render_dashboard(data):
                          f'<span class="dim">({h(d["top_attacker_ip"])})</span>'
                          if d["top_attacker_ip"] else '<span class="dim">—</span>')
         daily_rows += (
-            f'<tr><td class="glow day-link" data-day="{h(d["date"])}" title="Show this day on the map">{h(d["date"])}</td>'
+            f'<tr><td class="glow day-link" data-day="{h(d["date"])}" title="{h(d["date"])} · show this day on the map">{friendly_day(d["date"], today_key)}</td>'
             f'<td>{d["sessions"]:,}</td><td class="hide-mobile">{d["login_attempts"]:,}</td>'
             f'<td>{d["successful"]:,}</td><td>{d["unique_ips"]:,}</td>'
             f'<td class="hide-mobile">{d["commands"]:,}</td><td class="hide-mobile">{attacker_cell}</td></tr>'
