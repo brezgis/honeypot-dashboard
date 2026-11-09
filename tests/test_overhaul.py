@@ -131,7 +131,7 @@ class TestLLMPasses:
         cache = {}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits and hits[0]["story"]
-        assert not [k for k in cache if k.startswith("gh3_")]
+        assert not [k for k in cache if k.startswith("gh4_")]
 
     def test_cached_fallback_replaced_once_llm_is_up(self, tmp_path, mocker):
         good = "Logged in, ran uname to fingerprint the box, then left \u2014 window-shopping."
@@ -140,7 +140,7 @@ class TestLLMPasses:
         data = _data(tmp_path, LINES)
         cache = {}
         generate.generate_greatest_hits(data, desc_cache=cache)
-        (k,) = [k for k in cache if k.startswith("gh3_")]
+        (k,) = [k for k in cache if k.startswith("gh4_")]
         cache[k] = {"text": "Gained access and ran uname -a — hands-on-keyboard operator."}
         hits = generate.generate_greatest_hits(data, desc_cache=cache)
         assert hits[0]["story"] == good

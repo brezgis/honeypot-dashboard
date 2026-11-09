@@ -1663,8 +1663,8 @@ def generate_greatest_hits(data, desc_cache=None):
 
         # Cache check — good descriptions are permanent
         cmd_hash = hashlib.md5(str(sorted(set(all_cmds))).encode()).hexdigest()[:8] if all_cmds else "nocmds"
-        # gh3_: stories from the grounded, claim-checked prompt (gh_/gh2_ could invent actions)
-        cache_key = f"gh3_{ip}_{cmd_hash}"
+        # gh4_: stories from the grounded, claim-checked prompt (gh_/gh2_ could invent actions)
+        cache_key = f"gh4_{ip}_{cmd_hash}"
 
         cached_story = _cache_get(desc_cache, cache_key) if cache_key in desc_cache else None
         story = None
@@ -1689,7 +1689,7 @@ def generate_greatest_hits(data, desc_cache=None):
             profile_text = build_profile_text(ip, count, ip_sessions, all_cmds, creds)
             profile_text += ("\nOnly describe actions in the verified list. Commands that search for "
                              "something (miners, keys, wallets) did not install it. Passwords are guesses "
-                             "they TRIED, not things they stole or installed.")
+                             "they TRIED, not things they stole or installed. Don't mention what they did NOT do.")
             prompt_template = _CATEGORY_PROMPTS.get(category, PROMPT_BOMBER)
             prompt = prompt_template.replace("{profile}", profile_text)
 
