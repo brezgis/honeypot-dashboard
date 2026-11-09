@@ -174,3 +174,18 @@ class TestOutput:
             assert host not in html
         assert "COWRIE SSH HONEYPOT //" not in html and "What They Did" not in html
         assert 'data-ip="1.2.3.4"' in html and "onclick=" not in html
+
+
+class TestTerminalCaps:
+    def test_commands_capped_per_attacker(self, tmp_path, mocker, monkeypatch):
+        mocker.patch('generate.llm_generate', return_value="")
+        monkeypatch.setattr(generate, "TERMINAL_MAX_CMDS", 5)
+        monkeypatch.setattr(generate, "TERMINAL_MAX_CMD_CHARS", 50)
+        lines = LINES[:2] + [_make_log_line("cowrie.command.input", input=f"echo n{i}",
+                                            timestamp=f"2026-03-01T12:00:{i:02d}.000000Z")
+                             for i in range(12)]
+        lines.append(_make_log_line("cowrie.command.input", input="x" * 300,
+                                    timestamp="2026-03-01T12:00:59.000000Z"))
+        html, _ = generate.render_dashboard(_data(tmp_path, lines))
+        assert html.count('<span class="cmd-prompt">$</span>') == 5
+        assert "+8 more distinct commands" in html

@@ -401,6 +401,12 @@ DATA_OUTPUT_PATH = os.path.join(DATA_DIR, DATA_FILENAME)
 # panel is scrolled toward the bottom.
 TERMINAL_INITIAL_GROUPS = int(os.environ.get("TERMINAL_INITIAL_GROUPS", "30"))
 
+# Per attacker in that panel: distinct commands shown, and characters per
+# command. A few bots run thousands of commands (one ~15 KB each); uncapped they
+# made the live page 3.4 MB.
+TERMINAL_MAX_CMDS = int(os.environ.get("TERMINAL_MAX_CMDS", "25"))
+TERMINAL_MAX_CMD_CHARS = int(os.environ.get("TERMINAL_MAX_CMD_CHARS", "500"))
+
 # Map marker coordinates are rounded to this many decimals in the data file
 # (5 decimals ~ 1 m; markers are drawn with a >= 6px radius).
 MARKER_COORD_DECIMALS = 5
@@ -2391,11 +2397,21 @@ def render_dashboard(data):
             g += f'<div class="session-narrative">{h(atk["narrative"])}</div>'
             if atk.get("display_cmds"):
                 g += '<div class="session-cmds">'
-                for dc in atk["display_cmds"]:
+                shown = atk["display_cmds"][:TERMINAL_MAX_CMDS]
+                hidden = len(atk["display_cmds"]) - len(shown)
+                for dc in shown:
                     count_badge = f' <span class="cmd-count">×{dc["count"]}</span>' if dc["count"] > 1 else ""
                     annotation = annotate_command(dc["cmd"])
                     note_html = f'<div class="cmd-annotation">↳ {annotation}</div>' if annotation else ""
-                    g += f'<div class="cmd-line"><span class="cmd-prompt">$</span> {h(dc["cmd"])}{count_badge}</div>{note_html}'
+                    cmd = dc["cmd"]
+                    if len(cmd) > TERMINAL_MAX_CMD_CHARS:
+                        cmd_html = (h(cmd[:TERMINAL_MAX_CMD_CHARS]) +
+                                    f' <span class="cmd-count">\u2026 ({len(cmd):,} chars)</span>')
+                    else:
+                        cmd_html = h(cmd)
+                    g += f'<div class="cmd-line"><span class="cmd-prompt">$</span> {cmd_html}{count_badge}</div>{note_html}'
+                if hidden:
+                    g += f'<div class="cmd-line dim">+{hidden:,} more distinct command{"" if hidden == 1 else "s"}</div>'
                 g += '</div>'
             g += '</div></div>'
             terminal_groups.append(g)
