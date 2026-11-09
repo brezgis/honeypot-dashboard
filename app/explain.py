@@ -13,6 +13,7 @@ Rules were written against 60 days of real samovar traffic (27.8k distinct
 commands); tests/test_explain.py pins the important ones.
 """
 import re
+from functools import lru_cache
 
 MAX_STEPS = 4
 
@@ -124,12 +125,27 @@ _RULES = [
     (r"\bhistory\b|\.bash_history", "reads shell history"),
 ]
 
+# One-line descriptions for the Campaigns tile.
+CAMPAIGN_INFO = {
+    "mdrfckr SSH-key botnet": "Swaps root's SSH keys for its own (signed \u201cmdrfckr\u201d) and locks the folder so you can't undo it.",
+    "rival-cleanup dropper": "Kills other malware (secure.sh, auth.sh) and clears the IP blocklist before moving in.",
+    "Telegram session stealer": "Hunts for Telegram Desktop session files to hijack accounts, and checks for SMS modems.",
+    "honeypot-detection probe": "Fires arithmetic and process-ID checks a fake shell might get wrong. Thousands of commands from a handful of IPs.",
+    "sandbox-detection script": "Writes and runs a tiny script to see whether the box is real and lets it execute things.",
+    "Monero miner": "Installs a cryptominer plus a cron job to keep it running.",
+    "Kinsing miner": "Container-hunting cryptominer that kills rivals and digs in.",
+    "RedTail miner": "Cryptominer spread through SSH brute force and web exploits.",
+    "Mirai-family IoT botnet": "Recruits routers and cameras for DDoS attacks.",
+    "honeypot hunter": "Looks for Cowrie's own install folders. (It is, in fact, talking to Cowrie.)",
+}
+
 _CAMPAIGNS = [(re.compile(p, re.I), name) for p, name in CAMPAIGNS]
 _COMPILED = [(re.compile(p, re.I | re.M), label) for p, label in _RULES]
 # Noise that would otherwise trip rules (`2>/dev/null` contains "dev").
 _NOISE = re.compile(r"\s*\d?\s*>\s*/dev/null(\s*2>&1)?|\s*2>&1")
 
 
+@lru_cache(maxsize=65536)
 def campaign(cmd):
     """Name of a known campaign this command belongs to, or None."""
     for rx, name in _CAMPAIGNS:
@@ -151,6 +167,11 @@ _SUPPRESS = {
 
 def steps(cmd):
     """Behaviour labels found in cmd, in order of appearance, deduplicated."""
+    return list(_steps(cmd or ""))
+
+
+@lru_cache(maxsize=65536)
+def _steps(cmd):
     text = _NOISE.sub("", cmd or "")
     hits = []
     for order, (rx, label) in enumerate(_COMPILED):
@@ -163,7 +184,7 @@ def steps(cmd):
     for _pos, _order, label in sorted(hits):
         if label not in out and label not in drop:
             out.append(label)
-    return out
+    return tuple(out)
 
 
 def explain(cmd, max_steps=MAX_STEPS):

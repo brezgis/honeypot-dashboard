@@ -263,3 +263,43 @@ class TestClaimCheck:
         text = generate.build_profile_text("1.1.1.1", 5, [{}], self.SCANNER, [])
         assert "Deployed cryptominer" not in text and "SSH key injection" not in text
         assert "searches files for secrets" in text
+
+
+class TestInsightTiles:
+    def _data(self, tmp_path):
+        lines = []
+        for i in range(5):   # one operator rotating through a /24
+            ip = f"109.160.32.{10 + i}"
+            lines += [_make_log_line("cowrie.login.failed", src_ip=ip, session=f"r{i}", username="root",
+                                     password=pw) for pw in ("Huawei@123", "1qaz@WSX", "345gs5662d34", "admin")]
+        for i in range(3):   # mdrfckr: four steps that always happen together
+            ip, sid = f"5.5.5.{i}", f"m{i}"
+            lines += [_make_log_line("cowrie.login.success", src_ip=ip, session=sid, username="root", password="x"),
+                      _make_log_line("cowrie.command.input", src_ip=ip, session=sid,
+                                     input='cd ~ && rm -rf .ssh && mkdir .ssh && echo "ssh-rsa AAAA mdrfckr">>.ssh/authorized_keys && chmod -R go= ~/.ssh'),
+                      ] + ([_make_log_line("cowrie.command.input", src_ip=ip, session=sid, input="uname -a")] if i else [])
+        p = tmp_path / "c.json"; p.write_text("\n".join(lines))
+        return generate.analyze_events(generate.parse_log(str(p)), {})
+
+    def test_networks_group_by_block(self, tmp_path):
+        html = generate.networks_html(self._data(tmp_path))
+        assert "109.160.32.0/24" in html and ">5<" in html and ">20<" in html
+
+    def test_behaviour_merges_steps_that_always_co_occur(self, tmp_path):
+        html, n = generate.behaviour_html(self._data(tmp_path))
+        assert n == 3
+        # wipe/plant/lock collapse into one row (+2); uname stays separate
+        assert html.count('class="bar-row"') == 2 and "+2" in html and "identifies the OS" in html
+
+    def test_creative_passwords(self, tmp_path):
+        html = generate.creative_passwords_html(self._data(tmp_path))
+        assert "Huawei@123" in html
+        assert "1qaz@WSX" not in html.split('pw-note')[0]   # keyboard walk, not creative
+        assert "botnet signature" in html                   # 345gs5662d34 gets a note instead
+
+    def test_campaigns_and_over_time(self, tmp_path):
+        data = self._data(tmp_path)
+        camp = generate.campaigns_html(data, data["data_today"])
+        assert "mdrfckr SSH-key botnet" in camp and "3 IPs" in camp and 'data-ip="5.5.5.' in camp
+        ot = generate.over_time_html(data)
+        assert "Busiest day" in ot and "<svg" in ot and "Week of" in ot

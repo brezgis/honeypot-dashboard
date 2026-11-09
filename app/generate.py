@@ -19,6 +19,7 @@ Fixes applied (2026-03-24) - Pike:
 import glob
 import gzip
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -1352,6 +1353,7 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
         "geo_cache": geo_cache,
         "ip_creds": ip_creds,
         "ip_attempts": dict(ip_attempts),
+        "ip_creds_pairs": ip_creds_pairs,   # raw (user, pass), first-tried order
         "ip_first_seen": ip_first_seen,
         "ip_last_seen": ip_last_seen,
         "unique_countries": len(unique_countries),
@@ -2129,6 +2131,29 @@ td { color: var(--text); }
 .timeline .grid-line { stroke: var(--line-soft); stroke-width: 1; }
 .timeline text { fill: var(--muted); font-size: 10px; font-family: inherit; }
 
+/* --- insight tiles --- */
+.mono { font-family: inherit; color: var(--green); white-space: nowrap; }
+#networks th { white-space: nowrap; }
+.bars.wide .bar-row { grid-template-columns: minmax(0, 21em) 1fr 3.5em; }
+td.num { font-variant-numeric: tabular-nums; }
+.campaigns { max-height: 360px; display: grid; gap: 10px; }
+.camp { border-left: 2px solid var(--line); padding: 2px 0 2px 10px; }
+.camp-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.camp-name { color: var(--red-soft); font-weight: bold; }
+.camp-n { color: var(--green); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.camp-desc { color: var(--text); font-size: 0.8em; line-height: 1.4; margin-top: 2px; }
+.camp-last { color: #555; font-size: 0.75em; margin-top: 3px; }
+.camp-last .nick-link { font-weight: normal; }
+.pw-note { margin-top: 10px; }
+.facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.fact-k { color: #555; font-size: 0.68em; text-transform: uppercase; letter-spacing: 1px; }
+.fact-v { font-family: 'Orbitron', sans-serif; color: var(--green); font-size: 1.15em; margin: 3px 0;
+  text-shadow: 0 0 6px rgba(0,255,65,0.3); font-variant-numeric: tabular-nums; }
+.fact-s { color: #555; font-size: 0.7em; }
+.timeline .bar.partial { fill: rgba(0,255,65,0.25); }
+.totals { margin-top: 8px; text-align: center; }
+@media (max-width: 600px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
 /* --- successful logins terminal --- */
 .terminal {
   background: #000; border: 1px solid var(--line); border-radius: 6px; padding: 15px;
@@ -2174,7 +2199,7 @@ td { color: var(--text); }
   #map { height: 300px; }
   #dayLabel { min-width: 120px; }
   .legend { display: none; }
-  .bar-row { grid-template-columns: minmax(0, 10em) 1fr 3.5em; }
+  .bar-row, .bars.wide .bar-row { grid-template-columns: minmax(0, 13em) 1fr 3.5em; }
 }
 @media (prefers-reduced-motion: reduce) {
   .hp-pulse, .hp-select, .live-dot { animation: none; }
@@ -2245,6 +2270,217 @@ def friendly_day(key, today_key):
     if key == today_key:
         return "Today"
     return d.strftime("%a, %b %-d" if key[:4] == (today_key or "")[:4] else "%a, %b %-d, %Y")
+
+
+# --- Insight tiles -------------------------------------------------------------
+
+def _bar_rows(rows, empty):
+    """rows: [(label_html, value, value_text, title)] -> the .bars markup."""
+    if not rows:
+        return f'<div class="dim">{empty}</div>'
+    top = max(v for _l, v, _t, _ti in rows) or 1
+    return "".join(
+        f'<div class="bar-row"{f" title=\"{title}\"" if title else ""}><span class="bar-label">{label}</span>'
+        f'<span class="bar-track"><span class="bar-fill" style="width:{max(0.5, v / top * 100):.1f}%"></span></span>'
+        f'<span class="bar-val">{text}</span></div>'
+        for label, v, text, title in rows)
+
+
+def campaigns_html(data, today_key):
+    """Known campaigns seen in the window: IPs, last seen, what it does."""
+    idx = _ip_index(data)
+    camp_ips, last = defaultdict(set), {}
+    for ip, sessions in idx["sessions"].items():
+        for sess in sessions:
+            for c in sess["commands"]:
+                name = explain.campaign(c["cmd"])
+                if name:
+                    camp_ips[name].add(ip)
+                    if c["ts"] > last.get(name, ("", ""))[0]:
+                        last[name] = (c["ts"], ip)
+    if not camp_ips:
+        return '<div class="dim">No known campaigns seen yet.</div>'
+    rows = []
+    for name, ips in sorted(camp_ips.items(), key=lambda x: (-len(x[1]), x[0])):
+        ts, ip = last[name]
+        when = _local_dt(ts)
+        nick = _nickname_cache.get(ip, ip)
+        rows.append(
+            f'<div class="camp"><div class="camp-head"><span class="camp-name">{h(name)}</span>'
+            f'<span class="camp-n">{len(ips):,} IP{"" if len(ips) == 1 else "s"}</span></div>'
+            f'<div class="camp-desc">{h(explain.CAMPAIGN_INFO.get(name, ""))}</div>'
+            f'<div class="camp-last">latest {_nick_html(ip, nick)}'
+            f'{" · " + friendly_time(when, today_key) if when else ""}</div></div>')
+    return "".join(rows)
+
+
+def behaviour_html(data):
+    """Share of attackers who ran commands that did each thing. Steps that
+    (nearly) always happen together — one botnet's routine — share a row."""
+    idx = _ip_index(data)
+    who = defaultdict(set)
+    n = 0
+    for ip, cmds in idx["cmds"].items():
+        if not cmds:
+            continue
+        n += 1
+        for label in _behaviour(cmds)[1]:
+            who[label].add(ip)
+    if not n:
+        return '<div class="dim">Nobody has run a command yet.</div>', 0
+    ranked = sorted(who.items(), key=lambda x: (-len(x[1]) - _HIGH_SIGNAL.get(x[0], 0) / 100, x[0]))
+    rows, shown = [], []
+    for label, ips in ranked:
+        twin = next((s for s in shown if len(ips & s[1]) >= 0.95 * max(len(ips), len(s[1]))), None)
+        if twin:
+            twin[2].append(label)
+            continue
+        if len(shown) < 10:
+            shown.append([label, ips, []])
+    for label, ips, merged in shown:
+        title = h("also: " + ", ".join(merged)) if merged else ""
+        extra = f' <span class="dim">+{len(merged)}</span>' if merged else ""
+        rows.append((h(label) + extra, len(ips), f"{len(ips) / n:.0%}", title))
+    return _bar_rows(rows, ""), n
+
+
+def networks_html(data):
+    """Attack volume by network block (/24, or /48 for IPv6): one operator
+    rotating through a block of addresses shows up as one row."""
+    geo_cache = data.get("geo_cache", {})
+    got_in = set(_ip_index(data)["sessions"])
+    blocks = defaultdict(lambda: {"n": 0, "ips": set(), "isp": Counter(), "cc": Counter()})
+    for ip, count in data.get("ip_attempts", {}).items():
+        try:
+            net = ipaddress.ip_network(ip + ("/48" if ":" in ip else "/24"), strict=False)
+        except ValueError:
+            continue
+        b = blocks[str(net)]
+        b["n"] += count
+        b["ips"].add(ip)
+        geo = geo_cache.get(ip, {})
+        b["isp"][geo.get("isp") or "?"] += count
+        b["cc"][geo.get("countryCode") or ""] += count
+    if not blocks:
+        return '<div class="dim">No attacks yet.</div>'
+    rows = ""
+    for block, b in sorted(blocks.items(), key=lambda x: -x[1]["n"])[:8]:
+        isp = b["isp"].most_common(1)[0][0]
+        cc = b["cc"].most_common(1)[0][0]
+        n_in = len(b["ips"] & got_in)
+        ips = len(b["ips"])
+        rows += (
+            f'<tr><td><span class="mono">{h(block)}</span></td>'
+            f'<td class="num{" glow" if ips > 1 else ""}">{ips:,}</td>'
+            f'<td class="num">{b["n"]:,}</td>'
+            f'<td class="num hide-mobile">{n_in:,}</td>'
+            f'<td class="hide-mobile">{flag_emoji(cc)} {h(isp[:28])}</td></tr>')
+    return ('<table><thead><tr><th>Block</th><th>IPs</th><th>Attempts</th>'
+            '<th class="hide-mobile">Got in</th><th class="hide-mobile">Network</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>')
+
+
+# Words that don't make a password "creative": defaults, keyboard walks, filler.
+_DULL_WORDS = {
+    "admin", "root", "test", "user", "pass", "password", "passwd", "qwer", "qwert", "qwerty",
+    "asdf", "asdfgh", "zxcv", "zxcvbn", "wsxedc", "qazwsx", "welcome", "login", "abcd", "abcdef",
+    "ubuntu", "oracle", "guest", "server", "linux", "master", "default", "changeme", "temp",
+    "demo", "ftpuser", "testuser", "testtest", "support", "service", "system", "qwertyuiop",
+    "administrator", "rootroot", "adminadmin", "letmein", "secret", "word", "pass", "passw",
+    "developer", "deploy", "backup", "postgres", "mysql", "centos", "debian", "devops",
+    "user1", "qwerasdf", "asdfghjkl", "xsw", "edc", "rfv", "ssw", "ssword",
+}
+# Known signature passwords worth a note instead of a "creative" slot.
+_SIGNATURE_PASSWORDS = [(re.compile(r"\d*45gs5662d34"), "well-known botnet signature, tried as both username and password")]
+
+
+def creative_passwords_html(data, limit=12):
+    """Passwords built around a real word or name (not keyword walks or
+    defaults), tried by 3+ different IPs, ranked by how many."""
+    pw_ips = defaultdict(set)
+    for ip, pairs in data.get("ip_creds_pairs", {}).items():
+        for _u, p in pairs:
+            pw_ips[p].add(ip)
+    rows, notes = [], []
+    for p, ips in sorted(pw_ips.items(), key=lambda x: (-len(x[1]), x[0])):
+        if len(ips) < 3:
+            break
+        sig = next((note for rx, note in _SIGNATURE_PASSWORDS if rx.fullmatch(p.lower())), None)
+        if sig:
+            if not notes:
+                notes.append(f'<div class="dim small pw-note"><span class="mono">{h(p)}</span> '
+                             f'({len(ips):,} IPs) is a {sig}.</div>')
+            continue
+        words = [w for w in re.findall(r"[a-z]{4,}", p.lower()) if w not in _DULL_WORDS
+                 and not any(w in d or d in w for d in ("qwer", "asdf", "zxcv", "qaz", "wsx"))]
+        if len(p) < 6 or not words:
+            continue
+        rows.append((f'<span class="mono">{h(p)}</span>', len(ips), f"{len(ips):,} IPs", ""))
+        if len(rows) >= limit:
+            break
+    return _bar_rows(rows, "Nothing creative yet.") + "".join(notes)
+
+
+def _week_start(day_key):
+    d = datetime.strptime(day_key, "%Y-%m-%d").date()
+    return d - timedelta(days=d.weekday())
+
+
+def over_time_html(data):
+    """Weekly attack volume (SVG bars, logins that succeeded in amber) plus
+    the highlights from the old all-time table."""
+    weeks = defaultdict(lambda: [0, 0])
+    for d in data["daily_breakdown"]:
+        w = _week_start(d["date"])
+        weeks[w][0] += d["login_attempts"]
+        weeks[w][1] += d["successful"]
+    if not weeks:
+        return '<div class="dim">No data yet.</div>'
+    keys = sorted(weeks)
+    W, H, L0, B, T = 480, 150, 36, 20, 8
+    top = max(v[0] for v in weeks.values()) or 1
+    nice = 10 ** len(str(top)) // 10
+    nice = next(m * nice for m in (1, 2, 5, 10) if m * nice >= top)
+    bw = (W - L0) / len(keys)
+    this_week = _week_start(data.get("data_today") or keys[-1].isoformat())
+    out = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Login attempts per week">']
+    for g in range(5):
+        y = T + (H - B - T) * (1 - g / 4)
+        v = nice * g / 4
+        lab = f"{v / 1000:g}k" if v >= 1000 else f"{v:g}"
+        out.append(f'<line class="grid-line" x1="{L0}" x2="{W}" y1="{y:.1f}" y2="{y:.1f}"/>'
+                   f'<text x="{L0 - 5}" y="{y + 3:.1f}" text-anchor="end">{lab}</text>')
+    for i, w in enumerate(keys):
+        n, ok = weeks[w]
+        x = L0 + i * bw + 2
+        bh = (H - B - T) * n / nice
+        partial = " partial" if w == this_week else ""
+        label = f"Week of {w:%b %-d}: {n:,} login attempts, {ok:,} got in" + (" (so far)" if partial else "")
+        out.append(f'<rect class="bar{partial}" x="{x:.1f}" y="{H - B - bh:.1f}" width="{bw - 4:.1f}" '
+                   f'height="{max(bh, 1 if n else 0):.1f}"><title>{h(label)}</title></rect>')
+        if len(keys) <= 10 or i % 2 == 0:
+            out.append(f'<text x="{x + (bw - 4) / 2:.1f}" y="{H - 5}" text-anchor="middle">{w:%b %-d}</text>')
+    out.append("</svg>")
+
+    stats = data["stats"]
+    busiest_day = data.get("busiest_day") or ("", 0)
+    bw_key = max(keys, key=lambda k: weeks[k][0])
+    try:
+        bd = datetime.strptime(busiest_day[0], "%Y-%m-%d").strftime("%a, %b %-d")
+    except (ValueError, TypeError):
+        bd = "—"
+    facts = [
+        ("Busiest day", f"{busiest_day[1]:,}", bd),
+        ("Busiest week", f"{weeks[bw_key][0]:,}", f"week of {bw_key:%b %-d}"),
+        ("Peak hour", data.get("peak_hour", "—"), "most attempts (ET)"),
+        ("Got in", f"{data['averages']['success_rate']}%", f"{stats['successful_logins']:,} of {stats['total_login_attempts']:,}"),
+    ]
+    facts_html = "".join(f'<div class="fact"><div class="fact-k">{k}</div><div class="fact-v">{v}</div>'
+                         f'<div class="fact-s">{s}</div></div>' for k, v, s in facts)
+    totals = (f'{stats["total_sessions"]:,} sessions · {stats["unique_ips"]:,} IPs · '
+              f'{data.get("unique_countries", 0)} countries · {data["days_active"]} days')
+    return (f'<div class="facts">{facts_html}</div><div class="timeline weekly">{"".join(out)}</div>'
+            f'<div class="dim small totals">{totals}</div>')
 
 
 def render_dashboard(data):
@@ -2396,15 +2632,6 @@ def render_dashboard(data):
             f'<td class="hide-mobile">{d["commands"]:,}</td><td class="hide-mobile">{attacker_cell}</td></tr>'
         )
 
-    creds = data["top_creds"][:15]
-    cred_max = max((c[1] for c in creds), default=1) or 1
-    creds_html = "".join(
-        f'<div class="bar-row"><span class="bar-label" title="{label}">{label}</span>'
-        f'<span class="bar-track"><span class="bar-fill" style="width:{max(0.5, n / cred_max * 100):.1f}%"></span></span>'
-        f'<span class="bar-val">{n:,}</span></div>'
-        for label, n in creds   # labels are already escaped
-    ) or '<div class="dim">No login attempts yet.</div>'
-
     # Today's hourly counts, so the timeline draws before the data file arrives.
     today_key = data.get("data_today", "")
     today_hours = [0] * 24
@@ -2415,19 +2642,12 @@ def render_dashboard(data):
             except ValueError:
                 pass
 
-    sr_24h = round(last_24h.get('successful_logins', 0) / max(1, last_24h.get('login_attempts', 1)) * 100, 1)
-    avg = data['averages']
-    alltime_rows = (
-        f"<tr><td>Sessions</td><td class=\"glow\">{stats['total_sessions']:,}</td><td>{avg['sessions_per_day']:,}</td><td>{last_24h.get('sessions', 0):,}</td><td>{peak_sessions[0]:,} ({peak_sessions[1]})</td></tr>"
-        f"<tr><td>Login Attempts</td><td class=\"glow\">{stats['total_login_attempts']:,}</td><td>{avg['logins_per_day']:,}</td><td>{last_24h.get('login_attempts', 0):,}</td><td>{peak_logins[0]:,} ({peak_logins[1]})</td></tr>"
-        f"<tr><td>Successful Logins</td><td class=\"glow\">{stats['successful_logins']:,}</td><td>{avg['successful_per_day']:,}</td><td>{last_24h.get('successful_logins', 0):,}</td><td>{peak_successful[0]:,} ({peak_successful[1]})</td></tr>"
-        f"<tr><td>Unique IPs</td><td class=\"glow\">{stats['unique_ips']:,}</td><td>{avg['ips_per_day']:,}</td><td>{last_24h.get('unique_ips', 0):,}</td><td>{peak_ips[0]:,} ({peak_ips[1]})</td></tr>"
-        f"<tr><td>Commands Executed</td><td class=\"glow\">{stats['commands_executed']:,}</td><td>{avg['commands_per_day']:,}</td><td>{last_24h.get('commands', 0):,}</td><td>{peak_commands[0]:,} ({peak_commands[1]})</td></tr>"
-        f"<tr><td>Days Active</td><td class=\"glow\" colspan=\"4\">{data['days_active']}</td></tr>"
-        f"<tr><td>Success Rate</td><td class=\"glow\">{avg['success_rate']}%</td><td>{avg['success_rate']}%</td><td>{sr_24h}%</td><td>{peak_success_rate[0]}% ({peak_success_rate[1]})</td></tr>"
-    )
-
     got_in = len({s["ip"] for s in data.get("successful_sessions", [])})
+    campaigns = campaigns_html(data, today_key)
+    behaviour, behaviour_n = behaviour_html(data)
+    networks = networks_html(data)
+    over_time = over_time_html(data)
+    creative_html = creative_passwords_html(data)
 
     # Compact JSON (no whitespace, raw UTF-8). The page requests it with a
     # content-hash query so a regenerated file is never confused with a cached
@@ -2490,8 +2710,30 @@ def render_dashboard(data):
 
   <div class="grid">
     <div class="panel">
-      <h2>\U0001f511 Top Credentials</h2>
-      <div class="bars" id="credsChart" data-live>{creds_html}</div>
+      <div class="panel-head"><h2>\U0001f9ec Campaigns</h2><span class="panel-sub">known botnets seen · last {data["days_active"]} days</span></div>
+      <div class="campaigns scroll" id="campaigns" data-live>{campaigns}</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>\U0001f50e After They Get In</h2><span class="panel-sub" id="behaviourSub" data-live>{behaviour_n:,} attackers who ran commands</span></div>
+      <div class="bars wide" id="behaviour" data-live>{behaviour}</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="panel-head"><h2>\U0001f5fa Networks</h2><span class="panel-sub">one row per /24 block · many IPs = one operator rotating</span></div>
+      <div id="networks" data-live style="overflow-x:auto;">{networks}</div>
+    </div>
+    <div class="panel">
+      <h2>\U0001f4ca Over Time</h2>
+      <div id="overTime" data-live>{over_time}</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="panel-head"><h2>\U0001f511 Creative Passwords</h2><span class="panel-sub">built around a real word · tried by 3+ IPs</span></div>
+      <div class="bars" id="credsChart" data-live>{creative_html}</div>
     </div>
     <div class="panel">
       <h2 style="margin-bottom:0;">\U0001f4c8 Attack Timeline</h2>
@@ -2512,17 +2754,6 @@ def render_dashboard(data):
     </div>
   </div>
 
-  <div class="grid full">
-    <div class="panel">
-      <h2>\U0001f4ca All-Time Stats</h2>
-      <div id="alltimeStats" data-live style="overflow-x:auto;">
-        <table>
-          <thead><tr><th>Metric</th><th>Total</th><th>Avg / Day</th><th>Last 24h</th><th>Peak Day</th></tr></thead>
-          <tbody>{alltime_rows}</tbody>
-        </table>
-      </div>
-    </div>
-  </div>
 
   <div class="grid full">
     <div class="panel">
