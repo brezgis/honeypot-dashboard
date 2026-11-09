@@ -39,7 +39,7 @@ Internet → Port 22 (iptables NAT) → Cowrie honeypot (sandboxed)
 
 1. **Cowrie** captures SSH connections on port 22 (via iptables NAT redirect) and logs events as JSON
 2. **generate.py** runs every 5 minutes via cron, parses the last 7 days of logs, performs batch GeoIP lookups, generates LLM descriptions for interesting sessions, and renders a self-contained HTML dashboard
-3. **serve.py** serves the dashboard on localhost, behind nginx with TLS and HTTP basic auth
+3. **serve.py** serves the dashboard on localhost, behind nginx with TLS (the dashboard is public by design)
 4. **analytics.py** runs every 5 minutes, incrementally processing new log entries and maintaining aggregated statistics with 30-day retention
 
 ## The Bait
@@ -77,7 +77,7 @@ This disguise is effective — many attackers specifically try Solana-related cr
 - **Directory traversal protection** — `serve.py` only serves `dashboard.html`; all other paths return 404
 - **HTTPS rate limiting** — nginx `limit_req` on both HTTP and HTTPS endpoints prevents brute-forcing
 - **Localhost binding** — `serve.py` binds to `127.0.0.1` only; nginx handles external access
-- **HTTP basic auth** — Dashboard is password-protected
+- **Public, read-only** — The dashboard is intentionally open; it only shows attacker activity, never server configuration
 - **No sensitive data in output** — The generated HTML contains only attacker IPs and their activity, not server configuration
 
 ### Dashboard UI
