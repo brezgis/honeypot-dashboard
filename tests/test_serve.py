@@ -91,23 +91,74 @@ def test_missing_data_file_404(server):
 
 
 @pytest.mark.parametrize("path", ["/", "/dashboard.html", "/index.html", "/?x=1"])
-def test_page_served_with_refresh_and_gzip(server, path):
+def test_page_served_gzip_and_revalidatable(server, path):
     _, port = server
     r, body = _get(port, path, **{"Accept-Encoding": "gzip"})
     assert r.status == 200
     assert r.getheader("Content-Type") == "text/html; charset=utf-8"
-    assert r.getheader("Cache-Control") == "no-cache, no-store, must-revalidate"
+    # no-cache (not no-store): the page's 30s live-update poll revalidates
+    assert r.getheader("Cache-Control") == "no-cache"
+    assert r.getheader("ETag")
     assert r.getheader("Content-Encoding") == "gzip"
     html = gzip.decompress(body).decode("utf-8")
-    assert '<head>\n<meta http-equiv="refresh" content="30">' in html
-    assert "🍯 hi" in html
+    assert html == PAGE  # served as written: no injected <meta refresh>
+
+
+def test_page_revalidates_with_304(server):
+    tmp_path, port = server
+    r, _ = _get(port, "/")
+    etag = r.getheader("ETag")
+    r2, body2 = _get(port, "/", **{"If-None-Match": etag})
+    assert r2.status == 304 and body2 == b""
+    new = tmp_path / "new.html"
+    new.write_text(PAGE.replace("hi", "there"), encoding="utf-8")
+    new.replace(tmp_path / "dashboard.html")
+    r3, body3 = _get(port, "/", **{"If-None-Match": etag})
+    assert r3.status == 200 and b"there" in body3
 
 
 def test_page_identity(server):
     _, port = server
     r, body = _get(port, "/")
     assert r.getheader("Content-Encoding") is None
-    assert body.decode("utf-8").count('http-equiv="refresh"') == 1
+    assert body.decode("utf-8") == PAGE
+
+
+@pytest.fixture
+def static_dir(server, monkeypatch):
+    tmp_path, port = server
+    d = tmp_path / "static"
+    d.mkdir()
+    (d / "app.js").write_text("console.log('hi');" * 50)
+    (d / "font.woff2").write_bytes(b"wOF2" + bytes(range(200)))
+    (d / "notes.txt").write_text("nope")
+    monkeypatch.setattr(serve, "STATIC_DIR", str(d))
+    return d, port
+
+
+def test_static_js_cached_forever_and_gzipped(static_dir):
+    d, port = static_dir
+    r, body = _get(port, "/static/app.js?v=abc", **{"Accept-Encoding": "gzip"})
+    assert r.status == 200
+    assert r.getheader("Content-Type") == "text/javascript; charset=utf-8"
+    assert r.getheader("Cache-Control") == "public, max-age=31536000, immutable"
+    assert gzip.decompress(body) == (d / "app.js").read_bytes()
+
+
+def test_static_font_not_regzipped(static_dir):
+    d, port = static_dir
+    r, body = _get(port, "/static/font.woff2", **{"Accept-Encoding": "gzip"})
+    assert r.status == 200 and r.getheader("Content-Type") == "font/woff2"
+    assert r.getheader("Content-Encoding") is None
+    assert body == (d / "font.woff2").read_bytes()
+
+
+@pytest.mark.parametrize("path", ["/static/notes.txt", "/static/", "/static/../serve.py",
+                                  "/static/..%2Fserve.py", "/static/missing.js", "/static/.hidden.js"])
+def test_static_rejects_unknown_and_traversal(static_dir, path):
+    _, port = static_dir
+    r, _ = _get(port, path)
+    assert r.status == 404
 
 
 def test_head_has_no_body(server):

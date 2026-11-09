@@ -22,6 +22,15 @@ DATA_DIR = os.environ.get("HONEYPOT_DATA_DIR", SCRIPT_DIR)
 DASHBOARD_PATH = os.path.join(DATA_DIR, "dashboard.html")
 # Bulk page data written by generate.py beside dashboard.html and fetched by it.
 DATA_PATH = os.path.join(DATA_DIR, "dashboard-data.json")
+# Vendored JS/CSS/fonts (app/static). The page references them with a content
+# hash (?v=...), so they're cacheable forever.
+STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
+STATIC_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".woff2": "font/woff2",
+}
+STATIC_CACHE = "public, max-age=31536000, immutable"
 GENERATE_SCRIPT = os.path.join(SCRIPT_DIR, "generate.py")
 
 # Minimum seconds between regenerations (avoid hammering GeoIP API)
@@ -93,16 +102,18 @@ def _load_cached(path, transform=None):
     return entry[1:]
 
 
-def _add_refresh(body):
-    """Add the 30s auto-refresh meta tag if not present."""
-    content = body.decode()
-    if '<meta http-equiv="refresh"' not in content:
-        content = content.replace(
-            "<head>",
-            '<head>\n<meta http-equiv="refresh" content="30">',
-            1
-        )
-    return content.encode()
+def _static_path(path):
+    """Filesystem path for a /static/<name> URL, or None. Only plain file names
+    of known types that exist directly in STATIC_DIR are served."""
+    if not path.startswith("/static/"):
+        return None
+    name = path[len("/static/"):]
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    if os.path.splitext(name)[1] not in STATIC_TYPES:
+        return None
+    full = os.path.join(STATIC_DIR, name)
+    return full if os.path.isfile(full) else None
 
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
@@ -130,7 +141,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Vary", "Accept-Encoding")
             self.end_headers()
             return
-        use_gzip = self._accepts_gzip()
+        use_gzip = gz is not None and self._accepts_gzip()
         payload = gz if use_gzip else body
         self.send_response(200)
         self.send_header("Content-type", content_type)
@@ -161,15 +172,22 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_body(body, gz, "application/json; charset=utf-8",
                             "no-cache", etag=etag)
             return
+        static = _static_path(path)
+        if static:
+            body, gz, etag = _load_cached(static)
+            ctype = STATIC_TYPES[os.path.splitext(static)[1]]
+            # woff2 is already compressed; gzipping it again only costs CPU.
+            self._send_body(body, None if ctype == "font/woff2" else gz,
+                            ctype, STATIC_CACHE, etag=etag)
+            return
         if path in ("/", "/dashboard.html", "/index.html"):
-            # Regeneration handled by cron every 5 minutes
-            # regenerate()  # removed — avoid duplicate regeneration
-            self.path = "/dashboard.html"
-            # Serve whatever HTML we have (even if stale)
+            # Serve whatever HTML we have (even if stale). no-cache + ETag: the
+            # page's live-update poll (every 30s) is a 304 until the scheduler
+            # writes a new page. (No more <meta refresh>: full reloads blanked
+            # the map and reset every scroll position.)
             try:
-                body, gz, _etag = _load_cached(DASHBOARD_PATH, transform=_add_refresh)
-                self._send_body(body, gz, "text/html; charset=utf-8",
-                                "no-cache, no-store, must-revalidate")
+                body, gz, etag = _load_cached(DASHBOARD_PATH)
+                self._send_body(body, gz, "text/html; charset=utf-8", "no-cache", etag=etag)
                 return
             except FileNotFoundError:
                 self.send_response(200)
@@ -194,11 +212,14 @@ def main():
     if os.environ.get("SERVE_REGEN_ON_START", "1") != "0":
         regenerate()
 
-    server = http.server.HTTPServer((HOST, PORT), DashboardHandler)
+    # Threaded: one slow client (or a stalled mobile connection) used to block
+    # every other request, since the plain HTTPServer handles one at a time.
+    http.server.ThreadingHTTPServer.daemon_threads = True
+    server = http.server.ThreadingHTTPServer((HOST, PORT), DashboardHandler)
     print(f"\n{'='*60}")
     print(f"  Honeypot Dashboard Server")
     print(f"  http://{HOST}:{PORT}")
-    print(f"  Auto-refresh: 30 seconds")
+    print(f"  Live updates: page polls every 30 seconds")
     print(f"  Press Ctrl+C to stop")
     print(f"{'='*60}\n")
 

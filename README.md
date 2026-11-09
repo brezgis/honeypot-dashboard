@@ -58,7 +58,7 @@ This disguise is effective — many attackers specifically try Solana-related cr
 
 ### Session Intelligence
 - **3-layer description system:** Dictionary lookup → regex pattern matching → LLM generation (via Ollama)
-- **Attacker nicknames:** Country-themed names (e.g., `tulip_sol`, `dragon_root`) based on origin and behavior
+- **Attacker nicknames:** `<country-noun>_<signature>`, named for the most distinctive thing each attacker did: a known malware marker, the payload they fetched, an unusual command, or the rarest password they tried (e.g. `dragon_xmrig`, `tulip_jetaime`). Hover a name to see what it came from
 - **Command annotations:** Inline technical notes on what each command does and why an attacker would run it
 - **Description caching:** LLM descriptions are cached to avoid redundant inference
 
@@ -82,11 +82,12 @@ This disguise is effective — many attackers specifically try Solana-related cr
 
 ### Dashboard UI
 - Dark hacker-aesthetic theme with CRT scanline effect
-- Interactive Leaflet.js map with pulsing markers
-- Chart.js visualizations for credentials and attack timeline
-- Click-to-fly: click any attacker nickname to zoom to their location on the map
+- Interactive Leaflet.js map (canvas-rendered; amber = got in, pulsing = active in the last 90 min)
+- Lightweight CSS/SVG charts for credentials and the hourly timeline (no chart library)
+- Click any attacker name to fly to them on the map (switching to a day they were active if needed); click a date in the daily breakdown to show that day
 - Mobile-responsive layout
-- Auto-refresh every 30 seconds
+- Live updates in place every 30 seconds (no page reloads; scroll positions and map view are kept)
+- Leaflet and fonts are vendored in `app/static/` and served with immutable caching (no CDN requests)
 
 ## File Structure
 
@@ -355,7 +356,6 @@ A separate watcher script (not included in this repo) can monitor Cowrie logs in
 - **Python 3** — Dashboard generation, HTTP serving, analytics
 - **[Ollama](https://ollama.ai/)** — Local LLM inference for session descriptions
 - **[Leaflet.js](https://leafletjs.com/)** — Interactive attack origin map
-- **[Chart.js](https://www.chartjs.org/)** — Credential and timeline visualizations
 - **[ip-api.com](https://ip-api.com/)** — Batch GeoIP lookups (free tier)
 - **nginx** — Reverse proxy with TLS termination and rate limiting
 - **Let's Encrypt** — Free TLS certificates via certbot

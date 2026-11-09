@@ -117,10 +117,11 @@ class TestRenderDashboard:
         assert ", " not in data_json[:200] and "\n" not in data_json
         # the page fetches it with a content hash, and holds none of it inline
         version = hashlib.sha1(data_json.encode()).hexdigest()[:12]
-        assert f'"dashboard-data.json?v={version}"' in html
-        assert "var allMarkers = [];" in html
-        assert "var allTimelineLabels = [];" in html
+        config = json.loads(re.search(r'<script id="hpd-config" type="application/json">(.*?)</script>', html).group(1))
+        assert config["dataUrl"] == f"dashboard-data.json?v={version}"
+        assert config["today"] == data["data_today"] and len(config["todayHours"]) == 24
         assert '"daily_counts"' not in html and json.dumps(data["timeline_labels"]) not in html
+        assert '"strings"' not in html
         assert generate.generate_html(data) == html
 
     def test_terminal_split_preserves_all_groups(self, tmp_path, monkeypatch):
@@ -140,7 +141,7 @@ class TestRenderDashboard:
         assert html.count('class="term-ip-group"') == 5
         assert len(rest) == 7 and all(g.startswith('<div class="term-ip-group">') for g in rest)
         # inline groups + deferred groups == the full, all-inline terminal
-        term = re.compile(r'<div class="terminal" id="terminalLog"[^>]*>\s*(.*?)\s*</div>\s*</div>\s*</div>\s*</div>\s*<div class="footer">', re.S)
+        term = re.compile(r'id="terminalLog"[^>]*>(.*?)</div>\s*</div>\s*</div>\s*</div>\s*</body>', re.S)
         full_terminal = term.search(full_html).group(1)
         assert term.search(html).group(1) + "".join(rest) == full_terminal
         for i in range(12):
