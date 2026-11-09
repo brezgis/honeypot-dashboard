@@ -285,18 +285,6 @@ class TestInsightTiles:
         html = generate.networks_html(self._data(tmp_path))
         assert "109.160.32.0/24" in html and ">5<" in html and ">20<" in html
 
-    def test_behaviour_merges_steps_that_always_co_occur(self, tmp_path):
-        html, n = generate.behaviour_html(self._data(tmp_path))
-        assert n == 3
-        # wipe/plant/lock collapse into one row (+2); uname stays separate
-        assert html.count('class="bar-row"') == 2 and "+2" in html and "identifies the OS" in html
-
-    def test_creative_passwords(self, tmp_path):
-        html = generate.creative_passwords_html(self._data(tmp_path))
-        assert "Huawei@123" in html
-        assert "1qaz@WSX" not in html.split('pw-note')[0]   # keyboard walk, not creative
-        assert "botnet signature" in html                   # 345gs5662d34 gets a note instead
-
     def test_campaigns_and_over_time(self, tmp_path):
         data = self._data(tmp_path)
         camp = generate.campaigns_html(data, data["data_today"])

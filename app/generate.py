@@ -1353,7 +1353,6 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
         "geo_cache": geo_cache,
         "ip_creds": ip_creds,
         "ip_attempts": dict(ip_attempts),
-        "ip_creds_pairs": ip_creds_pairs,   # raw (user, pass), first-tried order
         "ip_first_seen": ip_first_seen,
         "ip_last_seen": ip_last_seen,
         "unique_countries": len(unique_countries),
@@ -2117,12 +2116,6 @@ td { color: var(--text); }
 .hit-card .hit-time { color: #555; font-size: 0.75em; margin-top: 4px; }
 
 /* --- charts --- */
-.bars { display: grid; gap: 5px; font-size: 0.78em; }
-.bar-row { display: grid; grid-template-columns: minmax(0, 15em) 1fr 4.5em; gap: 10px; align-items: center; }
-.bar-label { color: var(--green); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bar-track { height: 14px; background: #0f1a0f; border-radius: 2px; overflow: hidden; }
-.bar-fill { display: block; height: 100%; background: rgba(0,255,65,0.6); border-right: 1px solid var(--green); }
-.bar-val { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 #timelineDayLabel { color: #888; font-size: 0.75em; margin-bottom: 10px; }
 .timeline svg { width: 100%; height: auto; display: block; }
 .timeline .bar { fill: rgba(0,255,65,0.55); }
@@ -2134,7 +2127,6 @@ td { color: var(--text); }
 /* --- insight tiles --- */
 .mono { font-family: inherit; color: var(--green); white-space: nowrap; }
 #networks th { white-space: nowrap; }
-.bars.wide .bar-row { grid-template-columns: minmax(0, 21em) 1fr 3.5em; }
 td.num { font-variant-numeric: tabular-nums; }
 .campaigns { max-height: 360px; display: grid; gap: 10px; }
 .camp { border-left: 2px solid var(--line); padding: 2px 0 2px 10px; }
@@ -2144,7 +2136,6 @@ td.num { font-variant-numeric: tabular-nums; }
 .camp-desc { color: var(--text); font-size: 0.8em; line-height: 1.4; margin-top: 2px; }
 .camp-last { color: #555; font-size: 0.75em; margin-top: 3px; }
 .camp-last .nick-link { font-weight: normal; }
-.pw-note { margin-top: 10px; }
 .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .fact-k { color: #555; font-size: 0.68em; text-transform: uppercase; letter-spacing: 1px; }
 .fact-v { font-family: 'Orbitron', sans-serif; color: var(--green); font-size: 1.15em; margin: 3px 0;
@@ -2199,7 +2190,6 @@ td.num { font-variant-numeric: tabular-nums; }
   #map { height: 300px; }
   #dayLabel { min-width: 120px; }
   .legend { display: none; }
-  .bar-row, .bars.wide .bar-row { grid-template-columns: minmax(0, 13em) 1fr 3.5em; }
 }
 @media (prefers-reduced-motion: reduce) {
   .hp-pulse, .hp-select, .live-dot { animation: none; }
@@ -2274,18 +2264,6 @@ def friendly_day(key, today_key):
 
 # --- Insight tiles -------------------------------------------------------------
 
-def _bar_rows(rows, empty):
-    """rows: [(label_html, value, value_text, title)] -> the .bars markup."""
-    if not rows:
-        return f'<div class="dim">{empty}</div>'
-    top = max(v for _l, v, _t, _ti in rows) or 1
-    return "".join(
-        f'<div class="bar-row"{f" title=\"{title}\"" if title else ""}><span class="bar-label">{label}</span>'
-        f'<span class="bar-track"><span class="bar-fill" style="width:{max(0.5, v / top * 100):.1f}%"></span></span>'
-        f'<span class="bar-val">{text}</span></div>'
-        for label, v, text, title in rows)
-
-
 def campaigns_html(data, today_key):
     """Known campaigns seen in the window: IPs, last seen, what it does."""
     idx = _ip_index(data)
@@ -2312,36 +2290,6 @@ def campaigns_html(data, today_key):
             f'<div class="camp-last">latest {_nick_html(ip, nick)}'
             f'{" · " + friendly_time(when, today_key) if when else ""}</div></div>')
     return "".join(rows)
-
-
-def behaviour_html(data):
-    """Share of attackers who ran commands that did each thing. Steps that
-    (nearly) always happen together — one botnet's routine — share a row."""
-    idx = _ip_index(data)
-    who = defaultdict(set)
-    n = 0
-    for ip, cmds in idx["cmds"].items():
-        if not cmds:
-            continue
-        n += 1
-        for label in _behaviour(cmds)[1]:
-            who[label].add(ip)
-    if not n:
-        return '<div class="dim">Nobody has run a command yet.</div>', 0
-    ranked = sorted(who.items(), key=lambda x: (-len(x[1]) - _HIGH_SIGNAL.get(x[0], 0) / 100, x[0]))
-    rows, shown = [], []
-    for label, ips in ranked:
-        twin = next((s for s in shown if len(ips & s[1]) >= 0.95 * max(len(ips), len(s[1]))), None)
-        if twin:
-            twin[2].append(label)
-            continue
-        if len(shown) < 10:
-            shown.append([label, ips, []])
-    for label, ips, merged in shown:
-        title = h("also: " + ", ".join(merged)) if merged else ""
-        extra = f' <span class="dim">+{len(merged)}</span>' if merged else ""
-        rows.append((h(label) + extra, len(ips), f"{len(ips) / n:.0%}", title))
-    return _bar_rows(rows, ""), n
 
 
 def networks_html(data):
@@ -2378,47 +2326,6 @@ def networks_html(data):
     return ('<table><thead><tr><th>Block</th><th>IPs</th><th>Attempts</th>'
             '<th class="hide-mobile">Got in</th><th class="hide-mobile">Network</th></tr></thead>'
             f'<tbody>{rows}</tbody></table>')
-
-
-# Words that don't make a password "creative": defaults, keyboard walks, filler.
-_DULL_WORDS = {
-    "admin", "root", "test", "user", "pass", "password", "passwd", "qwer", "qwert", "qwerty",
-    "asdf", "asdfgh", "zxcv", "zxcvbn", "wsxedc", "qazwsx", "welcome", "login", "abcd", "abcdef",
-    "ubuntu", "oracle", "guest", "server", "linux", "master", "default", "changeme", "temp",
-    "demo", "ftpuser", "testuser", "testtest", "support", "service", "system", "qwertyuiop",
-    "administrator", "rootroot", "adminadmin", "letmein", "secret", "word", "pass", "passw",
-    "developer", "deploy", "backup", "postgres", "mysql", "centos", "debian", "devops",
-    "user1", "qwerasdf", "asdfghjkl", "xsw", "edc", "rfv", "ssw", "ssword",
-}
-# Known signature passwords worth a note instead of a "creative" slot.
-_SIGNATURE_PASSWORDS = [(re.compile(r"\d*45gs5662d34"), "well-known botnet signature, tried as both username and password")]
-
-
-def creative_passwords_html(data, limit=12):
-    """Passwords built around a real word or name (not keyword walks or
-    defaults), tried by 3+ different IPs, ranked by how many."""
-    pw_ips = defaultdict(set)
-    for ip, pairs in data.get("ip_creds_pairs", {}).items():
-        for _u, p in pairs:
-            pw_ips[p].add(ip)
-    rows, notes = [], []
-    for p, ips in sorted(pw_ips.items(), key=lambda x: (-len(x[1]), x[0])):
-        if len(ips) < 3:
-            break
-        sig = next((note for rx, note in _SIGNATURE_PASSWORDS if rx.fullmatch(p.lower())), None)
-        if sig:
-            if not notes:
-                notes.append(f'<div class="dim small pw-note"><span class="mono">{h(p)}</span> '
-                             f'({len(ips):,} IPs) is a {sig}.</div>')
-            continue
-        words = [w for w in re.findall(r"[a-z]{4,}", p.lower()) if w not in _DULL_WORDS
-                 and not any(w in d or d in w for d in ("qwer", "asdf", "zxcv", "qaz", "wsx"))]
-        if len(p) < 6 or not words:
-            continue
-        rows.append((f'<span class="mono">{h(p)}</span>', len(ips), f"{len(ips):,} IPs", ""))
-        if len(rows) >= limit:
-            break
-    return _bar_rows(rows, "Nothing creative yet.") + "".join(notes)
 
 
 def _week_start(day_key):
@@ -2644,10 +2551,9 @@ def render_dashboard(data):
 
     got_in = len({s["ip"] for s in data.get("successful_sessions", [])})
     campaigns = campaigns_html(data, today_key)
-    behaviour, behaviour_n = behaviour_html(data)
     networks = networks_html(data)
     over_time = over_time_html(data)
-    creative_html = creative_passwords_html(data)
+
 
     # Compact JSON (no whitespace, raw UTF-8). The page requests it with a
     # content-hash query so a regenerated file is never confused with a cached
@@ -2714,26 +2620,15 @@ def render_dashboard(data):
       <div class="campaigns scroll" id="campaigns" data-live>{campaigns}</div>
     </div>
     <div class="panel">
-      <div class="panel-head"><h2>\U0001f50e After They Get In</h2><span class="panel-sub" id="behaviourSub" data-live>{behaviour_n:,} attackers who ran commands</span></div>
-      <div class="bars wide" id="behaviour" data-live>{behaviour}</div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="panel">
       <div class="panel-head"><h2>\U0001f5fa Networks</h2><span class="panel-sub">one row per /24 block · many IPs = one operator rotating</span></div>
       <div id="networks" data-live style="overflow-x:auto;">{networks}</div>
     </div>
-    <div class="panel">
-      <h2>\U0001f4ca Over Time</h2>
-      <div id="overTime" data-live>{over_time}</div>
-    </div>
   </div>
 
   <div class="grid">
     <div class="panel">
-      <div class="panel-head"><h2>\U0001f511 Creative Passwords</h2><span class="panel-sub">built around a real word · tried by 3+ IPs</span></div>
-      <div class="bars" id="credsChart" data-live>{creative_html}</div>
+      <h2>\U0001f4ca Over Time</h2>
+      <div id="overTime" data-live>{over_time}</div>
     </div>
     <div class="panel">
       <h2 style="margin-bottom:0;">\U0001f4c8 Attack Timeline</h2>
