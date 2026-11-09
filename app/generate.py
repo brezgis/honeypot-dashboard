@@ -2328,6 +2328,18 @@ def networks_html(data):
             f'<tbody>{rows}</tbody></table>')
 
 
+def _nice_axis_max(v):
+    """Axis top = 4 × a round step (1, 2, 2.5, 5 × 10^k, whole numbers only): every quarter gridline
+    is a round number (same rule as niceMax() in app.js)."""
+    if v <= 4:
+        return 4
+    raw = v / 4
+    p = 10 ** math.floor(math.log10(raw))
+    m = raw / p
+    step = 1 if m <= 1 else 2 if m <= 2 else 2.5 if m <= 2.5 and p >= 10 else 5 if m <= 5 else 10
+    return int(step * p * 4)
+
+
 def _week_start(day_key):
     d = datetime.strptime(day_key, "%Y-%m-%d").date()
     return d - timedelta(days=d.weekday())
@@ -2346,8 +2358,7 @@ def over_time_html(data):
     keys = sorted(weeks)
     W, H, L0, B, T = 480, 150, 36, 20, 8
     top = max(v[0] for v in weeks.values()) or 1
-    nice = 10 ** len(str(top)) // 10
-    nice = next(m * nice for m in (1, 2, 5, 10) if m * nice >= top)
+    nice = _nice_axis_max(top)
     bw = (W - L0) / len(keys)
     this_week = _week_start(data.get("data_today") or keys[-1].isoformat())
     out = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Login attempts per week">']

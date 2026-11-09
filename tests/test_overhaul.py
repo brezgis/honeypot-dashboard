@@ -291,3 +291,8 @@ class TestInsightTiles:
         assert "mdrfckr SSH-key botnet" in camp and "3 IPs" in camp and 'data-ip="5.5.5.' in camp
         ot = generate.over_time_html(data)
         assert "Busiest day" in ot and "<svg" in ot and "Week of" in ot
+
+
+def test_axis_steps_are_round():
+    for v, top in [(3, 4), (30, 40), (48_000, 80_000), (98_221, 100_000), (1234, 2000), (9, 20)]:
+        assert generate._nice_axis_max(v) == top

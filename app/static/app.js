@@ -273,10 +273,12 @@
     out.push('</svg>');
     $('timeline').innerHTML = out.join('');
   }
+  // Axis top = 4 × a round step (1, 2, 2.5, 5 × 10^k; 2.5 only where whole), so every gridline label is
+  // a round number (not 13 / 25 / 38 / 50).
   function niceMax(v) {
     if (v <= 4) return 4;
-    var p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
-    return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+    var raw = v / 4, p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+    return (m <= 1 ? 1 : m <= 2 ? 2 : (m <= 2.5 && p >= 10) ? 2.5 : m <= 5 ? 5 : 10) * p * 4;
   }
   function compact(v) { return v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : String(v); }
 
