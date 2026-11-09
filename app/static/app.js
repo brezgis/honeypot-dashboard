@@ -100,16 +100,40 @@
     if (window.ResizeObserver) {
       new ResizeObserver(function () { map.invalidateSize(); }).observe($('map'));
     }
+    if (!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) requestAnimationFrame(breathe);
+  }
+
+  // Every dot breathes slowly on its own phase and tempo (seeded from its IP),
+  // so the map shimmers instead of pulsing in unison. One full redraw of the
+  // dot canvas per frame, capped near 30 fps; rAF pauses it in hidden tabs.
+  var BREATHE_MS = 33, lastBreath = 0;
+  function seed(ip) {   // FNV-1a hash -> [0, 1)
+    var h = 2166136261;
+    for (var i = 0; i < ip.length; i++) { h ^= ip.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0) / 4294967296;
+  }
+  function breathe(now) {
+    requestAnimationFrame(breathe);
+    if (now - lastBreath < BREATHE_MS || !canvas._map) return;
+    lastBreath = now;
+    var t = now / 1000;
+    dotLayer.eachLayer(function (dot) {
+      var b = 0.5 + 0.5 * Math.sin(t * dot.tempo + dot.phase);   // 0..1
+      dot.options.fillOpacity = 0.3 + 0.4 * b;
+      dot.options.opacity = 0.6 + 0.35 * b;
+    });
+    canvas._redraw();
   }
 
   function decode(d) {
     var c = d.markers, S = c.strings, recs = new Array(c.ip.length);
     byIp = {}; byDay = {}; dayHours = {};
     for (var i = 0; i < c.ip.length; i++) {
-      var daily = {}, days = [], flat = c.daily[i];
-      for (var j = 0; j < flat.length; j += 2) {
+      var daily = {}, hours = {}, days = [], flat = c.daily[i];
+      for (var j = 0; j < flat.length; j += 3) {
         var day = c.days[flat[j]];
         daily[day] = flat[j + 1];
+        hours[day] = flat[j + 2];   // bit h set = attempts in local hour h
         days.push(day);
       }
       var rec = recs[i] = {
@@ -117,7 +141,7 @@
         city: S[c.city[i]], country: S[c.country[i]], isp: S[c.isp[i]],
         creds: c.creds[i], why: c.why ? S[c.why[i]] : '',
         n: c.n ? c.n[i] : 0, ok: c.ok ? c.ok[i] : 0, last: c.last ? c.last[i] : 0,
-        daily: daily, days: days.sort()
+        daily: daily, hours: hours, days: days.sort()
       };
       byIp[rec.ip] = rec;
       for (var k = 0; k < days.length; k++) (byDay[days[k]] = byDay[days[k]] || []).push([rec, daily[days[k]]]);
@@ -137,7 +161,8 @@
     if (!map || !data) return;
     dotLayer.clearLayers();
     pulseLayer.clearLayers();
-    var rows = byDay[day] || [];
+    var rows = byDay[day] || [], dayTotal = rows.length;
+    if (hourFilter !== null) rows = rows.filter(function (r) { return (r[0].hours[day] >> hourFilter) & 1; });
     // Small dots on top of big ones, so every dot stays clickable.
     rows.sort(function (a, b) { return b[1] - a[1]; });
     var nowMin = cfg.generated / 60, pulses = 0;
@@ -148,6 +173,9 @@
         color: color, weight: 1.5, opacity: 0.9, fillColor: color, fillOpacity: 0.55
       });
       dot.rec = rec;
+      var s0 = seed(rec.ip);
+      dot.phase = s0 * 2 * Math.PI;
+      dot.tempo = 2 * Math.PI / (2.6 + 1.8 * ((s0 * 7.31) % 1));   // one breath every 2.6-4.4 s
       dot.on('click', onDotClick);
       dotLayer.addLayer(dot);
     }
@@ -163,12 +191,25 @@
       }
     }
     var label = (day === cfg.today ? 'Today · ' : '') + fmtDay(day);
-    $('dayLabel').textContent = label;
+    $('dayLabel').textContent = label + (hourFilter !== null ? ' · ' + hourRange(hourFilter) : '');
     $('dayLabel').title = rows.length + ' attacking IPs';
-    $('timelineDayLabel').textContent = label + ' · ' + rows.length.toLocaleString() + ' IPs';
+    $('timelineDayLabel').textContent = label + ' · ' + dayTotal.toLocaleString() + ' IPs';
     $('dayPrev').disabled = day <= minDay;
     $('dayNext').disabled = day >= cfg.today;
     drawSelection();
+  }
+
+  // ---- hour filter: click an hour bar to show only the attackers active then ----
+  var hourFilter = null;
+  function hourRange(hr) { var p = function (n) { return String(n % 24).padStart(2, '0') + ':00'; }; return p(hr) + '–' + p(hr + 1); }
+  function setHour(hr) {
+    hourFilter = hourFilter === hr ? null : hr;   // the same bar again shows the whole day
+    drawDay(currentDay());
+    drawTimeline(currentDay());
+    if (hourFilter === null) { note(''); return; }
+    $('map').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    var n = (byDay[currentDay()] || []).filter(function (r) { return (r[0].hours[currentDay()] >> hourFilter) & 1; }).length;
+    note(hourRange(hourFilter) + ' · ' + n.toLocaleString() + ' attacker' + (n === 1 ? '' : 's') + ' · click the bar again for the whole day', 6000);
   }
 
   function onDotClick(e) { selectedIp = e.target.rec.ip; drawSelection(); openPopup(e.target.rec); }
@@ -221,6 +262,7 @@
   }
 
   function setDay(day, persist) {
+    hourFilter = null;
     pinnedDay = day >= cfg.today ? null : day;
     if (persist !== false) storage('hpd_day', pinnedDay);
     drawDay(currentDay());
@@ -265,9 +307,11 @@
     var nowHour = day === cfg.today ? new Date(cfg.generated * 1000).getHours() : -1;
     for (var h = 0; h < 24; h++) {
       var bh = nice ? (H - B - T) * hours[h] / nice : 0, x = L0 + h * bw + 1.5;
-      out.push('<rect class="bar' + (h === nowHour ? ' now' : '') + '" x="' + x.toFixed(1) + '" y="' + (H - B - bh).toFixed(1) +
+      out.push('<rect class="bar' + (h === nowHour ? ' now' : '') + (h === hourFilter ? ' sel' : '') + '"' +
+        (hours[h] ? ' data-hour="' + h + '"' : '') + ' x="' + x.toFixed(1) + '" y="' + (H - B - bh).toFixed(1) +
         '" width="' + (bw - 3).toFixed(1) + '" height="' + Math.max(bh, hours[h] ? 1 : 0).toFixed(1) + '"><title>' +
-        String(h).padStart(2, '0') + ':00 — ' + hours[h].toLocaleString() + ' attempts</title></rect>');
+        String(h).padStart(2, '0') + ':00 — ' + hours[h].toLocaleString() + ' attempts' +
+        (hours[h] ? ' · click to show these attackers' : '') + '</title></rect>');
       if (h % 3 === 0) out.push('<text x="' + (x + bw / 2 - 1.5).toFixed(1) + '" y="' + (H - 5) + '" text-anchor="middle">' + String(h).padStart(2, '0') + '</text>');
     }
     out.push('</svg>');
@@ -359,6 +403,8 @@
     document.addEventListener('click', function (e) {
       var t = e.target.closest('[data-ip]');
       if (t) { selectAttacker(t.getAttribute('data-ip'), t.textContent.trim()); return; }
+      var hb = e.target.closest('[data-hour]');
+      if (hb) { if (data) setHour(+hb.getAttribute('data-hour')); return; }
       var d = e.target.closest('[data-day]');
       if (d) {
         setDay(d.getAttribute('data-day'));

@@ -32,7 +32,8 @@ def _decode_markers(c):
             "ip": c["ip"][i], "nickname": c["nick"][i], "lat": c["lat"][i], "lon": c["lon"][i],
             "city": S[c["city"][i]], "country": S[c["country"][i]], "isp": S[c["isp"][i]],
             "creds": [S[k] for k in c["creds"][i]],
-            "daily_counts": {c["days"][flat[j]]: flat[j + 1] for j in range(0, len(flat), 2)},
+            "daily_counts": {c["days"][flat[j]]: flat[j + 1] for j in range(0, len(flat), 3)},
+            "daily_hours": {c["days"][flat[j]]: flat[j + 2] for j in range(0, len(flat), 3)},
         })
     return out
 
@@ -79,7 +80,7 @@ class TestCompactMarkers:
         decoded = _decode_markers(generate.compact_markers(data["markers"]))
         assert len(decoded) == len(drawable)
         for got, want in zip(decoded, drawable):
-            for key in ("ip", "nickname", "city", "country", "isp", "creds", "daily_counts"):
+            for key in ("ip", "nickname", "city", "country", "isp", "creds", "daily_counts", "daily_hours"):
                 assert got[key] == want[key], key
             assert got["lat"] == pytest.approx(want["lat"], abs=1e-5)
             assert got["lon"] == pytest.approx(want["lon"], abs=1e-5)
@@ -102,6 +103,27 @@ class TestCompactMarkers:
         decoded = _decode_markers(c)
         assert decoded[0]["daily_counts"] == {"2026-03-02": 3, "2026-03-01": 1}
         assert decoded[1]["creds"] == ["root:a", "root:b"]
+
+
+    def test_hour_masks_cover_every_active_day(self, sample_log_lines, mock_geo_cache, tmp_path):
+        # Each day an IP has attempts, its mask marks at least one hour, and
+        # only real hours (bits 0-23) — the page filters the map by them.
+        data = _analyze(sample_log_lines, mock_geo_cache, tmp_path)
+        for m in data["markers"]:
+            if not m.get("daily_counts"):
+                continue
+            assert set(m["daily_hours"]) == set(m["daily_counts"])
+            for mask in m["daily_hours"].values():
+                assert 0 < mask < 1 << 24
+
+    def test_hour_mask_marks_the_local_hour_of_each_attempt(self, tmp_path):
+        # Two attempts from one IP, at 14:05 and 16:40 New York time (EDT, UTC-4).
+        lines = [json.dumps({"eventid": "cowrie.login.failed", "src_ip": "203.0.113.9", "session": s,
+                             "username": "root", "password": "x", "timestamp": ts})
+                 for s, ts in (("s1", "2026-06-01T18:05:00Z"), ("s2", "2026-06-01T20:40:00Z"))]
+        data = _analyze(lines, {"203.0.113.9": {"lat": 1, "lon": 1, "country": "X"}}, tmp_path)
+        m = next(m for m in data["markers"] if m["ip"] == "203.0.113.9")
+        assert m["daily_hours"] == {"2026-06-01": (1 << 14) | (1 << 16)}
 
 
 class TestRenderDashboard:

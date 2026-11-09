@@ -996,6 +996,7 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
     daily_ips = defaultdict(set)
     daily_commands = Counter()
     daily_ip_attempts = defaultdict(Counter)
+    daily_ip_hours = defaultdict(lambda: defaultdict(int))   # day -> ip -> 24-bit mask of local hours
     first_ts = None              # earliest event timestamp (for days_active)
 
     for e in events:
@@ -1053,6 +1054,7 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
                 if ip:
                     daily_ips[day_key].add(ip)
                     daily_ip_attempts[day_key][ip] += 1
+                    daily_ip_hours[day_key][ip] |= 1 << info[2]
             if info:
                 timeline[info[1]] += 1
                 hourly_attempts[info[2]] += 1
@@ -1158,10 +1160,11 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
     recent_events = grouped_recent[-20:]
 
     # Per-IP daily counts, built once (not a scan of every day per IP).
-    ip_daily = defaultdict(dict)
+    ip_daily, ip_hours = defaultdict(dict), defaultdict(dict)
     for day_k in sorted(daily_ip_attempts):
         for ip, n in daily_ip_attempts[day_k].items():
             ip_daily[ip][day_k] = n
+            ip_hours[ip][day_k] = daily_ip_hours[day_k][ip]
 
     markers = []
     seen_ips = set()
@@ -1193,6 +1196,7 @@ def analyze_events(events, geo_cache, now=None, geo_lookup=None):
             "first_seen": ip_first_seen.get(ip, ""),
             "last_seen": ip_last_seen.get(ip, ""),
             "daily_counts": ip_daily.get(ip, {}),
+            "daily_hours": ip_hours.get(ip, {}),
             "got_in": ip in ip_success,
             "named_for": nickname_source_text(ip),
         })
@@ -1872,7 +1876,8 @@ def compact_markers(markers):
     decodeMarkers() rebuilds one record per marker.
 
     Columns: ip, nick, lat, lon, city/country/isp/why (string-table indexes),
-    creds (list of indexes), daily (flat [day index, count, ...]), n (total
+    creds (list of indexes), daily (flat [day index, count, hour mask, ...];
+    bit h of the mask = attempts in local hour h that day), n (total
     attempts), ok (1 if the IP ever logged in), last (last attempt, epoch
     minutes).
     """
@@ -1907,8 +1912,9 @@ def compact_markers(markers):
             cred_ids.append(string_idx[c])
         cols["creds"].append(cred_ids)
         flat = []
+        hours = m.get("daily_hours", {})
         for day, count in sorted(m["daily_counts"].items()):
-            flat += [day_idx[day], count]
+            flat += [day_idx[day], count, hours.get(day, 0)]
         cols["daily"].append(flat)
         cols["n"].append(m.get("count", 0))
         cols["ok"].append(1 if m.get("got_in") else 0)
@@ -2120,6 +2126,8 @@ td { color: var(--text); }
 .timeline svg { width: 100%; height: auto; display: block; }
 .timeline .bar { fill: rgba(0,255,65,0.55); }
 .timeline .bar:hover { fill: var(--green); }
+.timeline .bar[data-day], .timeline .bar[data-hour] { cursor: pointer; }
+.timeline .bar.sel { fill: var(--green); }
 .timeline .bar.now { fill: var(--amber); }
 .timeline .grid-line { stroke: var(--line-soft); stroke-width: 1; }
 .timeline text { fill: var(--muted); font-size: 10px; font-family: inherit; }
@@ -2349,10 +2357,13 @@ def over_time_html(data):
     """Weekly attack volume (SVG bars, logins that succeeded in amber) plus
     the highlights from the old all-time table."""
     weeks = defaultdict(lambda: [0, 0])
+    busiest = {}                 # week -> (attempts, day): a bar click opens that day on the map
     for d in data["daily_breakdown"]:
         w = _week_start(d["date"])
         weeks[w][0] += d["login_attempts"]
         weeks[w][1] += d["successful"]
+        if d["login_attempts"] > busiest.get(w, (-1, ""))[0]:
+            busiest[w] = (d["login_attempts"], d["date"])
     if not weeks:
         return '<div class="dim">No data yet.</div>'
     keys = sorted(weeks)
@@ -2374,8 +2385,9 @@ def over_time_html(data):
         bh = (H - B - T) * n / nice
         partial = " partial" if w == this_week else ""
         label = f"Week of {w:%b %-d}: {n:,} login attempts, {ok:,} got in" + (" (so far)" if partial else "")
-        out.append(f'<rect class="bar{partial}" x="{x:.1f}" y="{H - B - bh:.1f}" width="{bw - 4:.1f}" '
-                   f'height="{max(bh, 1 if n else 0):.1f}"><title>{h(label)}</title></rect>')
+        day_attr = f' data-day="{h(busiest[w][1])}"' if n else ""
+        out.append(f'<rect class="bar{partial}"{day_attr} x="{x:.1f}" y="{H - B - bh:.1f}" width="{bw - 4:.1f}" '
+                   f'height="{max(bh, 1 if n else 0):.1f}"><title>{h(label)} · click for its busiest day</title></rect>')
         if len(keys) <= 10 or i % 2 == 0:
             out.append(f'<text x="{x + (bw - 4) / 2:.1f}" y="{H - 5}" text-anchor="middle">{w:%b %-d}</text>')
     out.append("</svg>")
