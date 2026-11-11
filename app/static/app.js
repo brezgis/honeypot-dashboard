@@ -119,8 +119,12 @@
     var t = now / 1000;
     dotLayer.eachLayer(function (dot) {
       var b = 0.5 + 0.5 * Math.sin(t * dot.tempo + dot.phase);   // 0..1
-      dot.options.fillOpacity = 0.3 + 0.4 * b;
-      dot.options.opacity = 0.6 + 0.35 * b;
+      // Opacity alone read as static on the bright dots, so they swell too.
+      // Setting _radius (not setRadius) skips a per-dot reproject; Leaflet
+      // resets it from options.radius on zoom and the next frame re-applies it.
+      dot._radius = dot.options.radius * (0.85 + 0.3 * b);
+      dot.options.fillOpacity = 0.22 + 0.58 * b;
+      dot.options.opacity = 0.5 + 0.45 * b;
     });
     canvas._redraw();
   }
